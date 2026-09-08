@@ -12,6 +12,7 @@ SHARE_MESSAGE_SELECTOR = ".message-item"
 DIRECT_LIST_SELECTOR = "div[class*='message-list-']"
 DIRECT_MESSAGE_SELECTOR = "div.my-0.w-full.mx-auto"
 WAIT_SELECTOR = f"{SHARE_MESSAGE_SELECTOR}, {DIRECT_LIST_SELECTOR}"
+HOSTS = ("doubao.com", "www.doubao.com")
 
 
 async def _scroll_messages(page, messages, message_count):

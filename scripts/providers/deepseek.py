@@ -9,6 +9,7 @@ from rich.console import Console
 
 DISPLAY_NAME = "DeepSeek"
 WAIT_SELECTOR = "[data-virtual-list-item-key] .ds-message"
+HOSTS = ("chat.deepseek.com",)
 
 console = Console()
 

@@ -8,6 +8,7 @@ from rich.console import Console
 
 DISPLAY_NAME = "ChatGPT"
 WAIT_SELECTOR = "[data-message-author-role]"
+HOSTS = ("chatgpt.com", "chat.openai.com")
 
 console = Console()
 

@@ -8,6 +8,7 @@ from bs4 import BeautifulSoup
 from playwright.async_api import async_playwright
 from rich.console import Console
 from rich.panel import Panel
+from urllib.parse import urlparse
 
 from .markdown_exporter import display_and_export
 from .project_paths import (
@@ -17,7 +18,12 @@ from .project_paths import (
     IMAGES_DIR,
     PROJECT_ROOT,
 )
-from .providers import WAIT_SELECTOR, collect_virtualized_html, parse_messages
+from .providers import (
+    WAIT_SELECTOR,
+    collect_virtualized_html,
+    parse_messages,
+    provider_for_host,
+)
 
 
 console = Console()
@@ -41,6 +47,94 @@ async def goto_with_retry(page, url, attempts=3):
                 f"{attempt + 1}/{attempts} 次尝试...[/yellow]"
             )
             await page.wait_for_timeout(2000 * attempt)
+
+
+async def _fetch_image_bytes(page, src):
+    """下载一张图片并返回字节；两种通道互为兜底。
+
+    首选 Playwright 的 ``page.request``（独立请求栈）。部分网络环境下该栈
+    会被重置（如 ``ECONNRESET``），此时回退到页面内 ``fetch``——它走浏览器
+    自身的网络栈，自动携带 Cookie/Referer，与页面正常加载图片同一通道，
+    对需要签名或同源策略宽松的图床（如 lh3.googleusercontent.com）更可靠。
+    任一通道失败均返回 ``None``，由调用方降级为保留远程图片链接。
+    """
+    try:
+        response = await page.request.get(src, timeout=10000)
+        if response.ok:
+            return await response.body()
+    except Exception:
+        pass
+
+    try:
+        data_url = await page.evaluate(
+            """async (u) => {
+                const resp = await fetch(u, { credentials: 'include' });
+                if (!resp.ok) return null;
+                const buf = await resp.arrayBuffer();
+                const bytes = new Uint8Array(buf);
+                let bin = '';
+                const chunk = 0x8000;
+                for (let i = 0; i < bytes.length; i += chunk) {
+                    bin += String.fromCharCode.apply(
+                        null, bytes.subarray(i, i + chunk)
+                    );
+                }
+                return 'data:b;base64,' + btoa(bin);
+            }""",
+            src,
+        )
+        if data_url and "," in data_url:
+            import base64
+            return base64.b64decode(data_url.split(",", 1)[1])
+    except Exception:
+        pass
+
+    return None
+
+
+async def _wait_for_conversation_content(page):
+    """等待对话内容挂载到 DOM（状态绑定，而非固定 sleep）。
+
+    短链跳转完成后以 ``page.url`` 的域名锁定平台适配器，等待该平台自己的
+    ``WAIT_SELECTOR`` 出现——比全平台联合选择器更准确，且日志能说明在等
+    哪个平台；域名无法识别时回退到联合选择器。等待成功/超时都有明确日志。
+    """
+    host = urlparse(page.url).netloc.lower().split(":", 1)[0]
+    provider = provider_for_host(host)
+
+    if provider is not None:
+        console.print(
+            f"[dim]正在等待 {provider.DISPLAY_NAME} 对话内容渲染...[/dim]"
+        )
+        try:
+            await page.wait_for_selector(
+                provider.WAIT_SELECTOR,
+                state="attached",
+                timeout=30000,
+            )
+            console.print(
+                f"[dim]{provider.DISPLAY_NAME} 对话节点已出现。[/dim]"
+            )
+            return
+        except Exception:
+            console.print(
+                f"[yellow]等待 {provider.DISPLAY_NAME} 对话节点超时，"
+                "正在尝试通用检测...[/yellow]"
+            )
+    else:
+        console.print("[dim]正在等待动态内容渲染...[/dim]")
+
+    try:
+        await page.wait_for_selector(
+            WAIT_SELECTOR,
+            state="attached",
+            timeout=15000,
+        )
+    except Exception:
+        console.print(
+            "[dim]提示: 等待动态节点超时，可能网页结构有所变化"
+            "或需登录访问。[/dim]"
+        )
 
 
 async def fetch_chat_content(url, need_login=False):
@@ -98,18 +192,9 @@ async def fetch_chat_content(url, need_login=False):
                 console.print("[dim]登录确认成功，继续抓取对话数据...[/dim]")
                 await page.wait_for_timeout(2000)
 
-            console.print("[dim]正在等待动态内容渲染...[/dim]")
-            try:
-                await page.wait_for_selector(
-                    WAIT_SELECTOR,
-                    state="attached",
-                    timeout=15000
-                )
-            except Exception:
-                console.print(
-                    "[dim]提示: 等待动态节点超时，可能网页结构有所变化"
-                    "或需登录访问。[/dim]"
-                )
+            # 按当前平台适配器的选择器等待内容挂载（短链跳转后以
+            # page.url 实际域名为准）；未识别平台时内部回退联合选择器。
+            await _wait_for_conversation_content(page)
             await page.wait_for_timeout(4000)
 
             # 需要虚拟列表处理的平台会逐屏收集；其他平台使用当前快照。
@@ -156,13 +241,10 @@ async def fetch_chat_content(url, need_login=False):
 
                     if not os.path.exists(filepath):
                         try:
-                            response = await page.request.get(
-                                src,
-                                timeout=10000
-                            )
-                            if response.ok:
+                            image_bytes = await _fetch_image_bytes(page, src)
+                            if image_bytes:
                                 with open(filepath, "wb") as image_file:
-                                    image_file.write(await response.body())
+                                    image_file.write(image_bytes)
                                 image_map[src] = f"./images/{filename}"
                                 img_index += 1
                         except Exception:

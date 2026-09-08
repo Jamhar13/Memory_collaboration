@@ -54,6 +54,13 @@ PRIVATE_CONVERSATION_PATTERNS = (
     re.compile(r"^/c/[0-9a-f-]+/?$", re.IGNORECASE),
     re.compile(r"^/a/chat/s/[0-9a-f-]+/?$", re.IGNORECASE),
 )
+# Gemini：gemini.google.com（短链 share.gemini.google 跳转而来）。
+# 公开分享 /share/<id> 无需登录；账号内会话 /app/<id> 需登录。
+# 裸 /app（新对话）与 /app?q=（预填提问）不是历史会话。
+GEMINI_HOSTS = {"gemini.google.com", "share.gemini.google"}
+GEMINI_PRIVATE_CONVERSATION_PATTERN = re.compile(
+    r"^/app/[0-9A-Za-z_-]{8,}/?$"
+)
 DOCUMENT_EXTENSIONS = {
     ".pdf", ".doc", ".docx", ".xls", ".xlsx", ".ppt", ".pptx",
     ".txt", ".csv", ".md", ".rtf",
@@ -306,6 +313,8 @@ async def _page_has_conversation_content(page: Any, page_url: str) -> bool:
             "div[class*='message-list-'] div.my-0.w-full.mx-auto "
             "div.flex.flex-row.w-full"
         )
+    elif host in GEMINI_HOSTS:
+        selector = "user-query, message-content, model-response"
     else:
         selector = WAIT_SELECTOR
     try:
@@ -351,6 +360,8 @@ def requires_authenticated_browser(url: str) -> bool:
         return bool(PRIVATE_CONVERSATION_PATTERNS[0].match(parsed.path))
     if host == "chat.deepseek.com":
         return bool(PRIVATE_CONVERSATION_PATTERNS[1].match(parsed.path))
+    if host in GEMINI_HOSTS:
+        return bool(GEMINI_PRIVATE_CONVERSATION_PATTERN.match(parsed.path))
     return False
 
 
