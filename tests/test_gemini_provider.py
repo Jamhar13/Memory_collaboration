@@ -263,9 +263,9 @@ class GeminiRealisticDomTests(unittest.TestCase):
 
 
 class GeminiRegistryTests(unittest.TestCase):
-    def test_provider_registered_last(self):
+    def test_provider_registered(self):
+        # 新平台按约定追加到末尾（当前末位为 Kimi），Gemini 保持已注册即可。
         self.assertIn(gemini, PROVIDERS)
-        self.assertIs(PROVIDERS[-1], gemini)
         self.assertEqual(gemini.DISPLAY_NAME, "Gemini")
         self.assertIn("user-query", WAIT_SELECTOR)
         self.assertIn("message-content", WAIT_SELECTOR)

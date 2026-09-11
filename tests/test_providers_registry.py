@@ -10,6 +10,8 @@ from scripts.providers import (
     deepseek,
     doubao,
     gemini,
+    kimi,
+    qianwen,
     provider_for_host,
 )
 
@@ -24,6 +26,12 @@ class ProviderForHostTests(unittest.TestCase):
             "www.doubao.com": doubao,
             "gemini.google.com": gemini,
             "share.gemini.google": gemini,
+            "kimi.com": kimi,
+            "www.kimi.com": kimi,
+            "kimi.moonshot.cn": kimi,
+            "qianwen.com": qianwen,
+            "www.qianwen.com": qianwen,
+            "qianwen.my.cn": qianwen,
         }
         for host, expected in cases.items():
             with self.subTest(host=host):

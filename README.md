@@ -1,7 +1,7 @@
 # AI 记忆协同管理工具
 
-本项目从 ChatGPT、DeepSeek、豆包和 Gemini（gemini.google.com）的分享页/会话页
-提取完整对话，并可选择调用
+本项目从 ChatGPT、DeepSeek、豆包、Gemini（gemini.google.com）和 Kimi（kimi.com）
+的分享页/会话页提取完整对话，并可选择调用
 Gemini API、SiliconFlow 或 DeepSeek 兼容接口，对文字、图片和可用文档进行多模态
 分层总结。
 
@@ -66,8 +66,10 @@ Chrome；两者都不可用时提示用户安装浏览器或下载全量版。�
 `release\lite-dist\AI记忆总结工具_轻量版` 文件夹，不能只发送 EXE。
 
 
-在 GUI 中可粘贴公开分享链接（含 Gemini `/share/` 分享页），也可粘贴 ChatGPT
-`/c/`、DeepSeek `/a/chat/s/` 或 Gemini `/app/<id>` 私有会话地址。选择“不登录”时，
+在 GUI 中可粘贴公开分享链接（含 Gemini `/share/`、Kimi `/share/<id>` 分享页，
+Kimi 链接可带 `/en/`、`/zh/` 语言段或 `?ra=1`、`?sharetype=link` 参数），
+也可粘贴 ChatGPT `/c/`、DeepSeek `/a/chat/s/`、Gemini `/app/<id>` 或
+Kimi `/chat/<id>` 私有会话地址。选择“不登录”时，
 ChatGPT 私有会话直接使用始终最小化的浏览器，其他平台（含 Gemini）先在后台无头
 复用登录态；只有确认当前登录态无法读取会话时，才恢复浏览器窗口要求登录。
 选择“授权登录”时则直接显示浏览器，并在确认后重新打开原始会话。

@@ -61,6 +61,20 @@ GEMINI_HOSTS = {"gemini.google.com", "share.gemini.google"}
 GEMINI_PRIVATE_CONVERSATION_PATTERN = re.compile(
     r"^/app/[0-9A-Za-z_-]{8,}/?$"
 )
+# Kimi：www.kimi.com / kimi.com（旧域名 kimi.moonshot.cn 跳转而来）。
+# 公开分享 /share/[<lang>/]<id> 无需登录；账号内会话 /chat/<id> 需登录
+# （未登录访问会重定向首页）。裸 /chat、/chat/history（7 字符，短于
+# {8,}）不是历史会话。
+KIMI_HOSTS = {"kimi.com", "www.kimi.com", "kimi.moonshot.cn"}
+KIMI_PRIVATE_CONVERSATION_PATTERN = re.compile(
+    r"^/chat/[0-9A-Za-z-]{8,}/?$"
+)
+# 千问：qianwen.com / qianwen.my.cn（原 tongyi.aliyun.com 301 跳转）。
+# 公开分享 /share/chat/<32hex> 无需登录；私有会话 /chat 需登录。
+QIANWEN_HOSTS = {"qianwen.com", "www.qianwen.com", "qianwen.my.cn"}
+QIANWEN_PRIVATE_CONVERSATION_PATTERN = re.compile(
+    r"^/chat(?:[/?]|$)"
+)
 DOCUMENT_EXTENSIONS = {
     ".pdf", ".doc", ".docx", ".xls", ".xlsx", ".ppt", ".pptx",
     ".txt", ".csv", ".md", ".rtf",
@@ -315,10 +329,39 @@ async def _page_has_conversation_content(page: Any, page_url: str) -> bool:
         )
     elif host in GEMINI_HOSTS:
         selector = "user-query, message-content, model-response"
+    elif host in KIMI_HOSTS:
+        # 不能用联合选择器：Kimi 首页营销壳含 .message-item，
+        # 会误中豆包选择器，把未登录重定向误判成会话已就绪。
+        selector = ".segment-user, .segment-assistant"
+    elif host in QIANWEN_HOSTS:
+        selector = ".question-text-card, .chat-answers-card-wrap"
     else:
         selector = WAIT_SELECTOR
+
+    # 私有会话未登录会被重定向到首页/登录页：URL 一旦离开原会话路径，
+    # 立即判定未就绪，不空等选择器超时。反之 URL 仍在会话页时，无头
+    # 冷启动 hydration 可能很慢（Gemini 实测约 25 秒），等待过短会把
+    # "已登录但渲染慢"误判成需要重新登录。
+    timeout_ms = 10000
+    requested = urlparse(page_url)
+    current = urlparse(getattr(page, "url", page_url))
+    current_host = current.netloc.lower().split(":", 1)[0]
+    private_checks = (
+        (GEMINI_HOSTS, GEMINI_PRIVATE_CONVERSATION_PATTERN),
+        (KIMI_HOSTS, KIMI_PRIVATE_CONVERSATION_PATTERN),
+        (QIANWEN_HOSTS, QIANWEN_PRIVATE_CONVERSATION_PATTERN),
+    )
+    for hosts, pattern in private_checks:
+        if host in hosts and pattern.match(requested.path):
+            timeout_ms = 30000 if hosts is GEMINI_HOSTS else 10000
+            if current_host not in hosts or not pattern.match(current.path):
+                return False
+            break
+
     try:
-        await page.wait_for_selector(selector, state="attached", timeout=10000)
+        await page.wait_for_selector(
+            selector, state="attached", timeout=timeout_ms
+        )
         return await page.locator(selector).count() > 0
     except Exception:
         return False
@@ -362,6 +405,10 @@ def requires_authenticated_browser(url: str) -> bool:
         return bool(PRIVATE_CONVERSATION_PATTERNS[1].match(parsed.path))
     if host in GEMINI_HOSTS:
         return bool(GEMINI_PRIVATE_CONVERSATION_PATTERN.match(parsed.path))
+    if host in KIMI_HOSTS:
+        return bool(KIMI_PRIVATE_CONVERSATION_PATTERN.match(parsed.path))
+    if host in QIANWEN_HOSTS:
+        return bool(QIANWEN_PRIVATE_CONVERSATION_PATTERN.match(parsed.path))
     return False
 
 
