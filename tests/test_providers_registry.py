@@ -12,6 +12,7 @@ from scripts.providers import (
     gemini,
     kimi,
     qianwen,
+    grok,
     provider_for_host,
 )
 
@@ -32,6 +33,8 @@ class ProviderForHostTests(unittest.TestCase):
             "qianwen.com": qianwen,
             "www.qianwen.com": qianwen,
             "qianwen.my.cn": qianwen,
+            "grok.com": grok,
+            "www.grok.com": grok,
         }
         for host, expected in cases.items():
             with self.subTest(host=host):

@@ -75,6 +75,9 @@ QIANWEN_HOSTS = {"qianwen.com", "www.qianwen.com", "qianwen.my.cn"}
 QIANWEN_PRIVATE_CONVERSATION_PATTERN = re.compile(
     r"^/chat(?:[/?]|$)"
 )
+# Grok：grok.com。公开分享 /share/<id> 无需登录；私有会话 /c/<uuid> 需登录。
+GROK_HOSTS = {"grok.com", "www.grok.com"}
+GROK_PRIVATE_CONVERSATION_PATTERN = re.compile(r"^/c/[0-9a-f-]{8,}")
 DOCUMENT_EXTENSIONS = {
     ".pdf", ".doc", ".docx", ".xls", ".xlsx", ".ppt", ".pptx",
     ".txt", ".csv", ".md", ".rtf",
@@ -335,13 +338,15 @@ async def _page_has_conversation_content(page: Any, page_url: str) -> bool:
         selector = ".segment-user, .segment-assistant"
     elif host in QIANWEN_HOSTS:
         selector = ".question-text-card, .chat-answers-card-wrap"
+    elif host in GROK_HOSTS:
+        selector = ".message-bubble[role='article']"
     else:
         selector = WAIT_SELECTOR
 
     # 私有会话未登录会被重定向到首页/登录页：URL 一旦离开原会话路径，
     # 立即判定未就绪，不空等选择器超时。反之 URL 仍在会话页时，无头
-    # 冷启动 hydration 可能很慢（Gemini 实测约 25 秒），等待过短会把
-    # "已登录但渲染慢"误判成需要重新登录。
+    # 冷启动 hydration 可能很慢（Gemini 实测约 25 秒、Grok 约 40 秒），
+    # 等待过短会把"已登录但渲染慢"误判成需要重新登录。
     timeout_ms = 10000
     requested = urlparse(page_url)
     current = urlparse(getattr(page, "url", page_url))
@@ -350,10 +355,13 @@ async def _page_has_conversation_content(page: Any, page_url: str) -> bool:
         (GEMINI_HOSTS, GEMINI_PRIVATE_CONVERSATION_PATTERN),
         (KIMI_HOSTS, KIMI_PRIVATE_CONVERSATION_PATTERN),
         (QIANWEN_HOSTS, QIANWEN_PRIVATE_CONVERSATION_PATTERN),
+        (GROK_HOSTS, GROK_PRIVATE_CONVERSATION_PATTERN),
     )
     for hosts, pattern in private_checks:
         if host in hosts and pattern.match(requested.path):
             timeout_ms = 30000 if hosts is GEMINI_HOSTS else 10000
+            if hosts is GROK_HOSTS:
+                timeout_ms = 45000
             if current_host not in hosts or not pattern.match(current.path):
                 return False
             break
@@ -409,6 +417,8 @@ def requires_authenticated_browser(url: str) -> bool:
         return bool(KIMI_PRIVATE_CONVERSATION_PATTERN.match(parsed.path))
     if host in QIANWEN_HOSTS:
         return bool(QIANWEN_PRIVATE_CONVERSATION_PATTERN.match(parsed.path))
+    if host in GROK_HOSTS:
+        return bool(GROK_PRIVATE_CONVERSATION_PATTERN.match(parsed.path))
     return False
 
 

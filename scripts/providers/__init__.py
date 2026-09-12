@@ -3,10 +3,10 @@
 新增平台时，在本目录创建模块并加入 PROVIDERS 即可。
 """
 
-from . import chatgpt, deepseek, doubao, gemini, kimi, qianwen
+from . import chatgpt, deepseek, doubao, gemini, kimi, qianwen, grok
 
 
-PROVIDERS = (chatgpt, deepseek, doubao, gemini, kimi, qianwen)
+PROVIDERS = (chatgpt, deepseek, doubao, gemini, kimi, qianwen, grok)
 WAIT_SELECTOR = ", ".join(provider.WAIT_SELECTOR for provider in PROVIDERS)
 
 
