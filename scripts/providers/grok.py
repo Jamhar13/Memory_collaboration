@@ -68,7 +68,12 @@ async def collect_html(page):
         fragments = await page.evaluate(
             """() => Array.from(
                 document.querySelectorAll('.message-bubble[role="article"]')
-            ).map(el => el.outerHTML)"""
+            ).map(el => {
+                const attachments = el.previousElementSibling;
+                return attachments?.querySelector('button[aria-label="打开附件"]')
+                    ? attachments.outerHTML + el.outerHTML
+                    : el.outerHTML;
+            })"""
         )
     except Exception:
         return None
@@ -119,15 +124,32 @@ def _clean_markdown(text):
 
 def _render_user(bubble, image_map):
     """提取用户消息正文，并保留图片和文件附件文本。"""
+    parts = []
+    attachments = bubble.find_previous_sibling()
+    if attachments:
+        for button in attachments.select('button[aria-label="打开附件"]'):
+            name = button.get_text(" ", strip=True)
+            local = image_map.get(name.lower(), "")
+            img = button.find("img")
+            if img:
+                src = img.get("src") or ""
+                original = src.rsplit("/", 1)[0] + "/content"
+                href = image_map.get(original) or image_map.get(src, local)
+                parts.append(f"![{name}]({href})" if href else name)
+            elif local:
+                parts.append(f"📎 [{name}]({local})")
+            else:
+                parts.append(f"📎 **[上传文件]** `{name}`")
     md = bubble.select_one(".markdown")
     if md is None:
-        return bubble.get_text("\n", strip=True).strip() or None
-    _strip_noise(md)
-    _localize_images(md, image_map)
-    text = markdownify.markdownify(str(md), heading_style="ATX")
-    # 用户消息中的“工作了 Ns”可能是正文内容，不应按 AI 思考标注剥离。
-    text = re.sub(r"\n{3,}", "\n\n", text)
-    return text.strip() or None
+        text = bubble.get_text("\n", strip=True).strip()
+    else:
+        _strip_noise(md)
+        _localize_images(md, image_map)
+        text = markdownify.markdownify(str(md), heading_style="ATX").strip()
+    if text:
+        parts.append(text)
+    return "\n\n".join(parts) or None
 
 
 def _render_ai(bubble, image_map):

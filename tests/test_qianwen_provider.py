@@ -5,6 +5,7 @@
 """
 
 import unittest
+from unittest.mock import AsyncMock, patch
 from bs4 import BeautifulSoup
 
 from scripts.providers import qianwen
@@ -127,6 +128,57 @@ class QianwenParseMessagesTests(unittest.TestCase):
         messages = qianwen.parse_messages(soup, image_map)
         self.assertIn("./images/img.png", messages[1]["content"])
         self.assertNotIn("https://example.com/img.png", messages[1]["content"])
+
+    def test_nested_resource_info_becomes_file_attachment(self):
+        fragments = qianwen._attachment_fragments({
+            "mime_type": "doc/url",
+            "meta_data": {"resource_infos": [{
+                "file_name": "result1.xlsx",
+                "url": "https://example.com/result1.xlsx",
+            }]},
+        })
+        self.assertEqual(len(fragments), 1)
+        self.assertIn('download="result1.xlsx"', fragments[0])
+        self.assertIn("https://example.com/result1.xlsx", fragments[0])
+
+    def test_nested_resource_info_becomes_image_attachment(self):
+        fragments = qianwen._attachment_fragments({
+            "mime_type": "image/url",
+            "meta_data": {"resource_infos": [{
+                "file_name": "image.png",
+                "url": "https://example.com/image.png",
+            }]},
+        })
+        self.assertEqual(len(fragments), 1)
+        self.assertIn('class="qk-attachment"', fragments[0])
+
+    def test_attachment_only_request_is_kept(self):
+        self.assertEqual(
+            qianwen._attachment_fragments({
+                "mime_type": "image/url",
+                "meta_data": {"resource_infos": [{
+                    "file_name": "image.png",
+                    "url": "https://example.com/image.png",
+                }]},
+            })[0].count("qk-attachment"),
+            1,
+        )
+
+
+class QianwenPrivateCollectionTests(unittest.IsolatedAsyncioTestCase):
+    async def test_private_records_are_reversed_to_chronological_order(self):
+        response = AsyncMock()
+        response.text.return_value = '{"code":0,"data":{"list":[{"create_time":"2"},{"create_time":"1"}]}}'
+        page = AsyncMock()
+        page.url = "https://www.qianwen.com/chat/5562e3046ace4ee083087f6e0907d54c"
+        page.context.cookies.return_value = [{"name": "b-user-id", "value": "user"}]
+        page.request.get.return_value = response
+        with patch("urllib.request.urlopen"):
+            records = await qianwen._collect_from_private(page)
+        self.assertEqual([record["create_time"] for record in records], ["1", "2"])
+        self.assertEqual(
+            page.request.get.call_args.kwargs["params"]["page_size"], "100"
+        )
 
 
 class QianwenShareIdPatternTests(unittest.TestCase):

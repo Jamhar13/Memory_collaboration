@@ -9,7 +9,7 @@ import unittest
 from pathlib import Path
 import tempfile
 from types import SimpleNamespace
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
 from bs4 import BeautifulSoup
 
 from gui.service import (
@@ -821,11 +821,31 @@ class GUIServiceTests(unittest.TestCase):
             set(),
         )
         self.assertEqual(len(deepseek_documents), 1)
-        self.assertEqual(
-            deepseek_documents[0].url,
+        self.assertEqual(deepseek_documents[0].url,
             "https://files.deepseeksvc.com/api/file?"
             "file_id=fake&state=signed&ty=r",
         )
+
+        grok_documents = []
+        grok_images = set()
+        _collect_response_assets(
+            {"fileAttachmentsMetadata": [{
+                "fileName": "result.xlsx",
+                "fileMimeType": (
+                    "application/vnd.openxmlformats-officedocument."
+                    "spreadsheetml.sheet"
+                ),
+                "fileUri": "users/user-id/asset-id/content",
+            }]},
+            "https://grok.com/c/conversation-id",
+            grok_documents,
+            grok_images,
+        )
+        self.assertEqual(grok_documents, [DocumentCandidate(
+            "users/user-id/asset-id/content",
+            "https://assets.grok.com/users/user-id/asset-id/content",
+            "result.xlsx",
+        )])
 
     def test_successful_chatgpt_document_response_is_reused_without_retry(self):
         class FakeResponse:
@@ -1163,6 +1183,36 @@ class GUIServiceTests(unittest.TestCase):
         })
         self.assertIn("/api/auth/session", script)
         self.assertNotIn("token", argument)
+
+    def test_grok_asset_uses_page_fetch_across_origins(self):
+        class ResponseInfo:
+            value = asyncio.sleep(0, result=SimpleNamespace(ok=True))
+
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, *_args):
+                return None
+
+        class FakePage:
+            url = "https://grok.com/c/conversation-id"
+
+            def __init__(self):
+                self.request = SimpleNamespace(get=AsyncMock())
+                self.argument = None
+
+            def expect_response(self, *_args, **_kwargs):
+                return ResponseInfo()
+
+            async def evaluate(self, _script, argument):
+                self.argument = argument
+
+        page = FakePage()
+        url = "https://assets.grok.com/users/user-id/asset-id/content"
+        result = asyncio.run(_authenticated_page_get(page, url, 1000))
+        self.assertTrue(result.ok)
+        self.assertEqual(page.argument, {"resource": url, "prepare": None})
+        page.request.get.assert_not_awaited()
 
     def test_chatgpt_share_placeholder_uses_matching_embedded_image(self):
         share_id = "6a5ed6e7-bd38-83ee-936d-571f7594a63e"

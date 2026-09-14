@@ -169,7 +169,8 @@ def _collect_response_assets(
     )
     for item in _iter_json_mappings(payload):
         filename = str(
-            item.get("file_name") or item.get("name") or ""
+            item.get("file_name") or item.get("fileName")
+            or item.get("name") or ""
         ).strip()
         mime_type = str(item.get("mime_type") or "").lower()
         suffix = Path(filename).suffix.lower()
@@ -206,6 +207,22 @@ def _collect_response_assets(
                     f"{origin}{DOUBAO_DOCUMENT_API_PATH}",
                     _safe_document_filename(filename, suffix),
                 ))
+
+        if host in GROK_HOSTS and filename:
+            key = str(item.get("key") or item.get("fileUri") or "").strip()
+            mime_type = str(
+                item.get("mimeType") or item.get("fileMimeType") or mime_type
+            ).lower()
+            if key.startswith("users/"):
+                asset_url = f"https://assets.grok.com/{key}"
+                if suffix in DOCUMENT_EXTENSIONS:
+                    document_candidates.append(DocumentCandidate(
+                        key,
+                        asset_url,
+                        _safe_document_filename(filename, suffix),
+                    ))
+                elif mime_type.startswith("image/"):
+                    image_references.add(asset_url)
 
         if host in {"chatgpt.com", "chat.openai.com"} and filename:
             reference_ids = []
@@ -311,6 +328,8 @@ def _is_asset_metadata_response(response_url: str) -> bool:
             token in path
             for token in ("/im/chain/single", "/im/chain/batch_single")
         )
+    if host in GROK_HOSTS:
+        return path.endswith("/load-responses")
     return False
 
 
@@ -884,7 +903,7 @@ async def _authenticated_page_get(page: Any, url: str, timeout: int):
         and page_origin.netloc.lower() == target_origin.netloc.lower()
         and page_origin.scheme in {"http", "https"}
     )
-    if not same_origin:
+    if not same_origin and target_origin.netloc.lower() != "assets.grok.com":
         return await page.request.get(url, timeout=timeout)
 
     async def fetch_from_page(
@@ -3174,7 +3193,7 @@ async def fetch_chat_pipeline(
                         ),
                     )
                 soup_pre = BeautifulSoup(html, "html.parser")
-                image_candidates: list[str] = []
+                image_candidates: list[str] = list(response_image_references)
                 if logger:
                     logger("正在检查并下载页面中的图片资产...")
 
@@ -3193,6 +3212,13 @@ async def fetch_chat_pipeline(
                             src
                             and src.startswith("http")
                             and not src.startswith("data:image/svg")
+                        ):
+                            continue
+                        if (
+                            current_host in GROK_HOSTS
+                            and src.endswith("/preview-image")
+                            and src.rsplit("/", 1)[0] + "/content"
+                            in response_image_references
                         ):
                             continue
                         if (

@@ -51,18 +51,25 @@ def _attachment_filename(message):
 
 def _attachment_fragments(message):
     mime = str(message.get("mime_type") or "").lower()
-    url = _attachment_value(
-        message, "download_url", "file_url", "url", "src", "resource_url"
-    )
-    if not url:
-        return []
-    filename = _html.escape(_attachment_filename(message), quote=True)
-    if mime.startswith("image/") or "image" in mime:
-        return [f'<img class="qk-attachment" src="{_html.escape(url, quote=True)}" alt="{filename}">']
-    return [
-        f'<a class="qk-file" href="{_html.escape(url, quote=True)}" '
-        f'download="{filename}">{filename}</a>'
-    ]
+    resources = message.get("meta_data", {}).get("resource_infos") or [message]
+    fragments = []
+    for resource in resources:
+        url = _attachment_value(
+            resource, "download_url", "file_url", "url", "src", "resource_url"
+        )
+        if not url:
+            continue
+        filename = _html.escape(_attachment_filename(resource), quote=True)
+        if mime.startswith("image/") or "image" in mime:
+            fragments.append(
+                f'<img class="qk-attachment" src="{_html.escape(url, quote=True)}" alt="{filename}">'
+            )
+        else:
+            fragments.append(
+                f'<a class="qk-file" href="{_html.escape(url, quote=True)}" '
+                f'download="{filename}">{filename}</a>'
+            )
+    return fragments
 
 
 async def _collect_from_share(page):
@@ -121,6 +128,7 @@ async def _collect_from_private(page):
                 "biz_id": "ai_qwen",
                 "return_response_messages": "true",
                 "event_filter": "all",
+                "page_size": "100",
                 "chat_client": "h5",
                 "device": "pc",
                 "fr": "pc",
@@ -138,7 +146,8 @@ async def _collect_from_private(page):
     if not data.get("data") or data.get("code") != 0:
         return None
 
-    return data.get("data", {}).get("list", [])
+    records = data.get("data", {}).get("list", [])
+    return list(reversed(records))
 
 
 async def collect_html(page):
@@ -159,19 +168,25 @@ async def collect_html(page):
 
     fragments = []
     for rec in records:
-        # --- 用户提问 ---
-        for req in rec.get("request_messages", []):
-            if req.get("mime_type") == "text/plain":
-                content = (req.get("content") or "").strip()
-                if content:
-                    attachments = []
-                    for attachment in rec.get("request_messages", []):
-                        attachments.extend(_attachment_fragments(attachment))
-                    fragments.append(
-                        f'<div class="qk-user" data-content="'
-                        f"{_html.escape(content, quote=True)}"
-                        f'">{"".join(attachments)}</div>'
-                    )
+        # --- 用户提问与附件 ---
+        request_messages = rec.get("request_messages", [])
+        content = next((
+            (message.get("content") or "").strip()
+            for message in request_messages
+            if message.get("mime_type") == "text/plain"
+            and (message.get("content") or "").strip()
+        ), "")
+        attachments = [
+            fragment
+            for message in request_messages
+            for fragment in _attachment_fragments(message)
+        ]
+        if content or attachments:
+            fragments.append(
+                f'<div class="qk-user" data-content="'
+                f"{_html.escape(content or '上传附件', quote=True)}"
+                f'">{"".join(attachments)}</div>'
+            )
 
         # --- AI 回答 ---
         for resp_msg in rec.get("response_messages", []):

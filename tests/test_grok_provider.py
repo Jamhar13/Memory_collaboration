@@ -425,6 +425,44 @@ class GrokRenderUserTests(unittest.TestCase):
         result = grok._render_user(bubble, {"https://x.com/a.png": "./images/a.png"})
         self.assertIn("文本", result)
 
+    def test_file_attachment_uses_local_mapping(self):
+        html = (
+            '<div><button aria-label="打开附件"><span>result.xlsx</span></button></div>'
+            + _build_html([("User", "<p>请分析</p>")]).split("<body>", 1)[1]
+        )
+        soup = BeautifulSoup(html, "html.parser")
+        result = grok._render_user(
+            soup.select_one(".message-bubble"),
+            {"result.xlsx": "./files/result.xlsx"},
+        )
+        self.assertIn("[result.xlsx](./files/result.xlsx)", result)
+        self.assertIn("请分析", result)
+
+    def test_file_attachment_without_mapping_keeps_placeholder(self):
+        html = (
+            '<div><button aria-label="打开附件"><span>result.xlsx</span></button></div>'
+            + _build_html([("User", "<p>请分析</p>")]).split("<body>", 1)[1]
+        )
+        soup = BeautifulSoup(html, "html.parser")
+        result = grok._render_user(soup.select_one(".message-bubble"), {})
+        self.assertIn("[上传文件]", result)
+        self.assertIn("result.xlsx", result)
+
+    def test_image_attachment_prefers_original_content(self):
+        preview = "https://assets.grok.com/users/u/a/preview-image"
+        original = "https://assets.grok.com/users/u/a/content"
+        html = (
+            '<div><button aria-label="打开附件"><span>image.png</span>'
+            f'<img src="{preview}"></button></div>'
+            + _build_html([("User", "<p>请分析</p>")]).split("<body>", 1)[1]
+        )
+        soup = BeautifulSoup(html, "html.parser")
+        result = grok._render_user(soup.select_one(".message-bubble"), {
+            preview: "./images/preview.png",
+            original: "./images/original.png",
+        })
+        self.assertIn("![image.png](./images/original.png)", result)
+
 
 class GrokRenderAiTests(unittest.TestCase):
     """_render_ai 直接测试。"""
