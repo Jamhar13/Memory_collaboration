@@ -2,6 +2,8 @@
 import asyncio
 import unittest
 
+from bs4 import BeautifulSoup
+
 from scripts.parser import _wait_for_conversation_content
 from scripts.providers import (
     PROVIDERS,
@@ -13,6 +15,7 @@ from scripts.providers import (
     kimi,
     qianwen,
     grok,
+    parse_messages,
     provider_for_host,
 )
 
@@ -62,6 +65,27 @@ class ProviderForHostTests(unittest.TestCase):
             for host in hosts:
                 self.assertNotIn(host, seen, f"HOSTS 冲突: {host}")
                 seen[host] = provider
+
+
+class ParseMessagesIsolationTests(unittest.TestCase):
+    def test_failed_provider_probe_cannot_mutate_later_provider_dom(self):
+        html = """
+        <user-query data-gemini-role="user">
+          <user-query-file-preview>
+            <button aria-label="以灯箱形式显示上传的图片">
+              <img src="https://lh3.googleusercontent.com/example" alt="上传图片">
+            </button>
+          </user-query-file-preview>
+        </user-query>
+        <message-content data-gemini-role="assistant"><p>回答</p></message-content>
+        """
+        provider, messages = parse_messages(
+            BeautifulSoup(html, "html.parser"),
+            {"https://lh3.googleusercontent.com/example": "./images/example.png"},
+        )
+        self.assertIs(provider, gemini)
+        self.assertEqual([item["role"] for item in messages], ["User", "AI"])
+        self.assertIn("./images/example.png", messages[0]["content"])
 
 
 class WaitForConversationContentTests(unittest.TestCase):

@@ -118,16 +118,16 @@ def _clean_markdown(text):
 
 
 def _render_user(bubble, image_map):
-    """提取用户消息正文。"""
+    """提取用户消息正文，并保留图片和文件附件文本。"""
     md = bubble.select_one(".markdown")
     if md is None:
         return bubble.get_text("\n", strip=True).strip() or None
-    for tag in _NOISE_TAGS:
-        for el in md.find_all(tag):
-            el.decompose()
+    _strip_noise(md)
     _localize_images(md, image_map)
-    text = md.get_text("\n", strip=True).strip()
-    return text or None
+    text = markdownify.markdownify(str(md), heading_style="ATX")
+    # 用户消息中的“工作了 Ns”可能是正文内容，不应按 AI 思考标注剥离。
+    text = re.sub(r"\n{3,}", "\n\n", text)
+    return text.strip() or None
 
 
 def _render_ai(bubble, image_map):
@@ -140,7 +140,6 @@ def _render_ai(bubble, image_map):
     text = markdownify.markdownify(
         str(md),
         heading_style="ATX",
-        strip=["img"],
     )
     text = _clean_markdown(text)
     return text or None

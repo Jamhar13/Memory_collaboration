@@ -11,7 +11,11 @@ from bs4 import BeautifulSoup
 
 from scripts.providers import gemini
 from scripts.providers import PROVIDERS, WAIT_SELECTOR
-from gui.service import requires_authenticated_browser
+from gui.service import (
+    _extract_document_candidates,
+    _extract_gemini_document_card_candidates,
+    requires_authenticated_browser,
+)
 
 
 def soup(html):
@@ -255,6 +259,52 @@ class GeminiRealisticDomTests(unittest.TestCase):
         # 图片型附件（灯箱）保留为图片而非文档占位。
         self.assertIn("lh3.googleusercontent.com/gg/REALUSERIMG", user)
         self.assertNotIn("无法查看或下载", user)
+
+    def test_user_document_uses_local_filename_mapping(self):
+        messages = gemini.parse_messages(
+            soup(REALISTIC_HTML), {"lab 1.pdf": "./attachments/Lab%201.pdf"}
+        )
+        self.assertIn("[Lab 1.pdf](./attachments/Lab%201.pdf)", messages[0]["content"])
+
+    def test_private_document_uses_aria_extension_for_local_mapping(self):
+        html = """
+        <user-query>
+          <user-query-file-preview>
+            <button aria-label="申请表.doc">
+              <div class="filename-label">申请表</div>
+            </button>
+          </user-query-file-preview>
+        </user-query>
+        """
+        messages = gemini.parse_messages(
+            soup(html), {"申请表.doc": "./files/申请表.doc"}
+        )
+        self.assertIn("[申请表.doc](./files/申请表.doc)", messages[0]["content"])
+
+    def test_private_document_card_candidate_uses_aria_filename(self):
+        html = """
+        <user-query-file-preview>
+          <button aria-label="完整文件名.pdf">
+            <div data-test-id="extension-label">PDF</div>
+            <div data-test-id="filename-label">完整文件名</div>
+          </button>
+        </user-query-file-preview>
+        """
+        candidates = _extract_gemini_document_card_candidates(
+            html, "https://gemini.google.com/app/058650b27dade1e6"
+        )
+        self.assertEqual(len(candidates), 1)
+        self.assertEqual(candidates[0].filename, "完整文件名.pdf")
+        self.assertTrue(candidates[0].reference.startswith("gemini-card:"))
+
+    def test_stylesheet_is_not_document_candidate(self):
+        html = '<link href="https://gemini.gstatic.com/app.css" title="notes.md">'
+        self.assertEqual(
+            _extract_document_candidates(
+                html, "https://gemini.google.com/app/058650b27dade1e6"
+            ),
+            [],
+        )
 
     def test_screen_reader_prefix_removed(self):
         user = self.messages[0]["content"]

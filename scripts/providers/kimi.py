@@ -156,6 +156,13 @@ def _answer_containers(segment):
 
 
 def _strip_noise(node) -> None:
+    for img in list(node.select('img[src^="data:image/svg+xml"]')):
+        current = img
+        while current.parent is not None and current.parent is not node:
+            current = current.parent
+            if "预览文件" in current.get_text(" ", strip=True):
+                current.decompose()
+                break
     for selector in _NOISE_SELECTORS:
         for element in node.select(selector):
             element.decompose()
@@ -321,7 +328,7 @@ def _render_assistant(segment, image_map) -> str:
 
 
 def _parse_file_attachment(card):
-    """从 .attachment-list-file 提取 (文件名, 大小文本)；失败返回 (None, None)。"""
+    """从 .attachment-list-file 提取 (文件名, 大小文本, 下载地址)。"""
     lines = [
         line.strip()
         for line in card.get_text("\n", strip=True).split("\n")
@@ -344,7 +351,16 @@ def _parse_file_attachment(card):
         rf"\.{re.escape(ext)}$", name, flags=re.IGNORECASE
     ):
         name = f"{name}.{ext}"
-    return name, (size or None)
+    url = ""
+    for element in card.find_all(True):
+        for attribute in ("href", "data-url", "data-download-url", "data-file-url"):
+            value = str(element.get(attribute) or "").strip()
+            if value.startswith(("http://", "https://")):
+                url = value
+                break
+        if url:
+            break
+    return name, (size or None), url
 
 
 def _render_user(segment, image_map) -> str:
@@ -363,11 +379,15 @@ def _render_user(segment, image_map) -> str:
 
     # 文件附件：分享页不提供下载，按项目约定标记为不可用。
     for card in segment.select(".attachment-list-file"):
-        name, size = _parse_file_attachment(card)
+        name, size, url = _parse_file_attachment(card)
         if not name:
             continue
         suffix = f"（{size}）" if size else ""
-        parts.append(f"📎 **[上传文件]** `{name}`{suffix}")
+        local = image_map.get(url, url) if url else image_map.get(name.lower(), "")
+        if local:
+            parts.append(f"📎 [{name}]({local}){suffix}")
+        else:
+            parts.append(f"📎 **[上传文件]** `{name}`{suffix}")
 
     # 正文（.user-content 在 rollup__flat 内；取最后一个非空文本，兼容多段）。
     text_nodes = segment.select(".user-content")

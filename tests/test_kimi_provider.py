@@ -16,7 +16,10 @@ from scripts.providers import (
     parse_messages as registry_parse_messages,
     provider_for_host,
 )
-from gui.service import requires_authenticated_browser
+from gui.service import (
+    _extract_kimi_document_card_candidates,
+    requires_authenticated_browser,
+)
 
 
 def soup(html):
@@ -271,6 +274,30 @@ class KimiParseMessagesTests(unittest.TestCase):
         # 正文仍保留。
         self.assertIn("Answer", content)
 
+    def test_user_file_attachment_uses_local_filename_mapping(self):
+        messages = kimi.parse_messages(soup(KIMI_ATTACHMENT_HTML), {
+            **IMAGE_MAP,
+            "食品安全法第一章总则.doc": "./files/食品安全法第一章总则.doc",
+        })
+        self.assertIn(
+            "📎 [食品安全法第一章总则.doc](./files/食品安全法第一章总则.doc)",
+            messages[0]["content"],
+        )
+
+    def test_assistant_file_preview_svg_is_removed(self):
+        html = assistant_segment('''
+          <div class="paragraph">结果如下。</div>
+          <div class="generated-file-card">
+            <img src="data:image/svg+xml,%3csvg/%3e">
+            <span>moisture_profiles.png</span><span>预览文件</span>
+          </div>
+        ''')
+        content = kimi.parse_messages(soup(html), IMAGE_MAP)[0]["content"]
+        self.assertIn("结果如下", content)
+        self.assertNotIn("data:image/svg", content)
+        self.assertNotIn("moisture_profiles.png", content)
+        self.assertNotIn("预览文件", content)
+
     def test_empty_segments_produce_none(self):
         html = (
             '<div class="segment segment-user"></div>'
@@ -280,6 +307,16 @@ class KimiParseMessagesTests(unittest.TestCase):
 
 
 class KimiRegistryTests(unittest.TestCase):
+    def test_private_file_cards_become_download_candidates(self):
+        candidates = _extract_kimi_document_card_candidates(
+            KIMI_ATTACHMENT_HTML,
+            "https://www.kimi.com/chat/19a99232-7452-86a8-8000-x",
+        )
+        self.assertEqual([item.filename for item in candidates], [
+            "食品安全法第一章总则.doc"
+        ])
+        self.assertTrue(candidates[0].reference.startswith("kimi-card:"))
+
     def test_kimi_registered(self):
         self.assertIn(kimi, PROVIDERS)
 

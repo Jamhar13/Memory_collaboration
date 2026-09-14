@@ -270,8 +270,8 @@ def _localize_images(node, image_map) -> None:
                 del img["data-src"]
 
 
-def _extract_document_attachments(node):
-    """提取用户上传的文档附件为不可用占位，返回 [markdown, ...]。
+def _extract_document_attachments(node, asset_map):
+    """提取用户上传的文档附件，优先使用已下载的本地链接。
 
     分享页不提供文档下载（按钮 aria-label 为“无法查看或下载共享对话中的
     文件”），按项目约定标记为不可用；图片型附件（aria 含“图片/灯箱”）保留
@@ -298,18 +298,31 @@ def _extract_document_attachments(node):
         name = name_node.get_text(strip=True) if name_node else ""
         ext = ext_node.get_text(strip=True) if ext_node else ""
         if name:
-            filename = name
+            filename = aria if re.search(r"\.[A-Za-z0-9]{1,10}$", aria) else name
             if ext and not re.search(
-                rf"\.{re.escape(ext)}$", name, flags=re.IGNORECASE
+                rf"\.{re.escape(ext)}$", filename, flags=re.IGNORECASE
             ):
-                filename = f"{name}.{ext.lower()}"
-            placeholders.append(f"📎 **[上传文档]** `{filename}`")
+                filename = f"{filename}.{ext.lower()}"
+            url = ""
+            for element in card.find_all(True):
+                for attribute in ("href", "data-url", "data-download-url", "data-file-url"):
+                    value = str(element.get(attribute) or "").strip()
+                    if value.startswith(("http://", "https://")):
+                        url = value
+                        break
+                if url:
+                    break
+            local = asset_map.get(url, url) if url else asset_map.get(filename.lower(), "")
+            if local:
+                placeholders.append(f"📎 [{filename}]({local})")
+            else:
+                placeholders.append(f"📎 **[上传文档]** `{filename}`")
         card.decompose()
     return placeholders
 
 
 def _render_user(node, image_map) -> str:
-    attachments = _extract_document_attachments(node)
+    attachments = _extract_document_attachments(node, image_map)
     _strip_noise(node)
     _strip_decorative_images(node)
     _localize_images(node, image_map)

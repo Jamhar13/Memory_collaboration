@@ -33,6 +33,38 @@ _SESSION_ID_PATTERN = re.compile(r"(?<!/share)/chat/([0-9a-f]{32})", re.IGNORECA
 _AI_MIME_TYPE = "multi_load/iframe"
 
 
+def _attachment_value(message, *keys):
+    for key in keys:
+        value = message.get(key)
+        if isinstance(value, str) and value.startswith(("http://", "https://")):
+            return value
+    return ""
+
+
+def _attachment_filename(message):
+    for key in ("file_name", "filename", "name", "title"):
+        value = str(message.get(key) or "").strip()
+        if value:
+            return value
+    return "上传附件"
+
+
+def _attachment_fragments(message):
+    mime = str(message.get("mime_type") or "").lower()
+    url = _attachment_value(
+        message, "download_url", "file_url", "url", "src", "resource_url"
+    )
+    if not url:
+        return []
+    filename = _html.escape(_attachment_filename(message), quote=True)
+    if mime.startswith("image/") or "image" in mime:
+        return [f'<img class="qk-attachment" src="{_html.escape(url, quote=True)}" alt="{filename}">']
+    return [
+        f'<a class="qk-file" href="{_html.escape(url, quote=True)}" '
+        f'download="{filename}">{filename}</a>'
+    ]
+
+
 async def _collect_from_share(page):
     """通过公开分享 API 采集对话。"""
     match = _SHARE_ID_PATTERN.search(page.url)
@@ -132,10 +164,13 @@ async def collect_html(page):
             if req.get("mime_type") == "text/plain":
                 content = (req.get("content") or "").strip()
                 if content:
+                    attachments = []
+                    for attachment in rec.get("request_messages", []):
+                        attachments.extend(_attachment_fragments(attachment))
                     fragments.append(
                         f'<div class="qk-user" data-content="'
                         f"{_html.escape(content, quote=True)}"
-                        f'"></div>'
+                        f'">{"".join(attachments)}</div>'
                     )
 
         # --- AI 回答 ---
@@ -180,6 +215,21 @@ def parse_messages(soup, image_map=None):
         if not content:
             continue
         if "qk-user" in classes:
+            attachments = []
+            for img in node.select("img.qk-attachment"):
+                src = img.get("src") or ""
+                src = image_map.get(src, src)
+                if src:
+                    alt = img.get("alt") or "用户图片"
+                    attachments.append(f"![{alt}]({src})")
+            for file_node in node.select("a.qk-file"):
+                href = file_node.get("href") or ""
+                href = image_map.get(href, href)
+                name = file_node.get("download") or file_node.get_text(strip=True)
+                if href:
+                    attachments.append(f"📎 [{name}]({href})")
+            if attachments:
+                content = "\n\n".join([*attachments, content])
             messages.append({"role": "User", "content": content})
         elif "qk-ai" in classes:
             # 将 markdown 中的远程图片 URL 替换为本地路径

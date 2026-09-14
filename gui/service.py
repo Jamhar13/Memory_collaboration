@@ -101,6 +101,8 @@ DOUBAO_DOCUMENT_API_PATH = "/alice/message/get_file_url"
 DOUBAO_AI_DOCUMENT_MAX_COUNT = 12
 CHATGPT_CARD_REFERENCE_PREFIX = "chatgpt-card:"
 DEEPSEEK_CARD_REFERENCE_PREFIX = "deepseek-card:"
+GEMINI_CARD_REFERENCE_PREFIX = "gemini-card:"
+KIMI_CARD_REFERENCE_PREFIX = "kimi-card:"
 CHATGPT_ESCAPED_QUOTE = re.escape(chr(92) + '"')
 CHATGPT_EMBEDDED_DOCUMENT_PATTERNS = (
     re.compile(
@@ -1257,7 +1259,61 @@ async def _download_image_candidates(
                         )
             except Exception as error:
                 failure_reason = type(error).__name__
+                try:
+                    data_url = await page.evaluate(
+                        """async (url) => {
+                            const response = await fetch(url, {credentials: 'include'});
+                            if (!response.ok) return null;
+                            const bytes = new Uint8Array(await response.arrayBuffer());
+                            let binary = '';
+                            for (let i = 0; i < bytes.length; i += 0x8000) {
+                                binary += String.fromCharCode.apply(
+                                    null, bytes.subarray(i, i + 0x8000)
+                                );
+                            }
+                            return 'data:;base64,' + btoa(binary);
+                        }""",
+                        src,
+                    )
+                    if data_url and "," in data_url:
+                        import base64
+                        body = base64.b64decode(data_url.split(",", 1)[1])
+                        if _is_supported_image_body(body):
+                            return src, body, None
+                        failure_reason = "not_an_image"
+                except Exception as fallback_error:
+                    failure_reason = type(fallback_error).__name__
                 continue
+        try:
+            images = page.locator("img")
+            for index in range(await images.count()):
+                image = images.nth(index)
+                current = await image.get_attribute("src") or await image.get_attribute("data-src")
+                if current == src and await image.is_visible():
+                    canvas_id = await image.evaluate(
+                        """img => {
+                            const canvas = document.createElement('canvas');
+                            canvas.id = `trae-image-${Date.now()}`;
+                            canvas.width = img.naturalWidth;
+                            canvas.height = img.naturalHeight;
+                            canvas.style.cssText = `position: fixed !important; left: 0 !important;
+                                top: 0 !important; z-index: 2147483647 !important;`;
+                            canvas.getContext('2d').drawImage(img, 0, 0);
+                            document.body.appendChild(canvas);
+                            return canvas.id;
+                        }"""
+                    )
+                    canvas = page.locator(f"#{canvas_id}")
+                    try:
+                        body = await canvas.screenshot(
+                            type="png", timeout=GUI_IMAGE_DOWNLOAD_TIMEOUT_MS
+                        )
+                    finally:
+                        await canvas.evaluate("node => node.remove()")
+                    if _is_supported_image_body(body):
+                        return src, body, None
+        except Exception as screenshot_error:
+            failure_reason = type(screenshot_error).__name__
         return src, None, failure_reason or "unknown_error"
 
     download_results = await asyncio.gather(*(
@@ -1641,6 +1697,77 @@ def _extract_deepseek_document_card_candidates(
     return candidates
 
 
+def _extract_kimi_document_card_candidates(
+    html: str,
+    base_url: str,
+) -> list[DocumentCandidate]:
+    """从 Kimi 私有会话文件卡片建立点击下载候选。"""
+    if urlparse(base_url).netloc.lower().split(":", 1)[0] not in KIMI_HOSTS:
+        return []
+    candidates = []
+    seen_names = set()
+    soup = BeautifulSoup(html or "", "html.parser")
+    for card in soup.select(".attachment-list-file"):
+        name_node = card.select_one(".file-card-info-name, .file-card-name")
+        ext_node = card.select_one(".file-ext")
+        icon = card.select_one(".file-card-icon")
+        name = name_node.get_text(strip=True) if name_node else ""
+        ext = (
+            ext_node.get_text(strip=True) if ext_node
+            else str(icon.get("alt") or "") if icon else ""
+        ).lower()
+        if not ext:
+            ext = next((
+                text.lower()
+                for text in card.stripped_strings
+                if re.fullmatch(r"[A-Z0-9]{1,8}", text)
+            ), "")
+        filename = name if not ext or name.lower().endswith(f".{ext}") else f"{name}.{ext}"
+        filename = _safe_document_filename(filename)
+        lowered = filename.lower()
+        if Path(filename).suffix.lower() not in DOCUMENT_EXTENSIONS or lowered in seen_names:
+            continue
+        seen_names.add(lowered)
+        candidates.append(DocumentCandidate(
+            f"{KIMI_CARD_REFERENCE_PREFIX}{lowered}",
+            str(base_url),
+            filename,
+        ))
+    return candidates
+
+
+def _extract_gemini_document_card_candidates(
+    html: str,
+    base_url: str,
+) -> list[DocumentCandidate]:
+    """从 Gemini 私有会话文件卡片建立点击下载候选。"""
+    if urlparse(base_url).netloc.lower().split(":", 1)[0] not in GEMINI_HOSTS:
+        return []
+    candidates = []
+    seen_names = set()
+    soup = BeautifulSoup(html or "", "html.parser")
+    for card in soup.find_all("user-query-file-preview"):
+        button = card.find("button")
+        name_node = card.select_one(".filename-label, [data-test-id='filename-label']")
+        ext_node = card.select_one(".extension-label, [data-test-id='extension-label']")
+        name = name_node.get_text(strip=True) if name_node else ""
+        ext = ext_node.get_text(strip=True) if ext_node else ""
+        filename = str(button.get("aria-label") or "").strip() if button else ""
+        if not filename and name:
+            filename = name if not ext or name.lower().endswith(f".{ext.lower()}") else f"{name}.{ext.lower()}"
+        filename = _safe_document_filename(filename)
+        lowered = filename.lower()
+        if Path(filename).suffix.lower() not in DOCUMENT_EXTENSIONS or lowered in seen_names:
+            continue
+        seen_names.add(lowered)
+        candidates.append(DocumentCandidate(
+            f"{GEMINI_CARD_REFERENCE_PREFIX}{lowered}",
+            str(base_url),
+            filename,
+        ))
+    return candidates
+
+
 def _extract_document_candidates(
     html: str,
     base_url: str,
@@ -1654,6 +1781,8 @@ def _extract_document_candidates(
         "data-file-url", "data-resource-url",
     )
     for element in soup.find_all(True):
+        if element.name in {"link", "script", "style"}:
+            continue
         label = " ".join(element.get_text(" ", strip=True).split())
         declared_name = str(element.get("download") or "").strip()
         for attribute in url_attributes:
@@ -2331,6 +2460,83 @@ async def _save_doubao_ai_documents(
     return resolved, len(titles)
 
 
+async def _kimi_document_card_download(
+    page: Any,
+    candidate: DocumentCandidate,
+    timeout: int,
+) -> tuple[bytes, dict[str, str]]:
+    """点击 Kimi 文件卡片，取回预览器请求的原文件。"""
+    cards = page.locator(".attachment-list-file")
+    card = cards.filter(has_text=Path(candidate.filename).stem).first
+
+    def is_file_response(response: Any) -> bool:
+        parsed = urlparse(response.url)
+        return (
+            parsed.path.startswith("/apiv2-files/sign-obj/")
+            and parse_qs(parsed.query).get("t") == ["o"]
+        ) or (
+            parsed.netloc.lower() == "view.officeapps.live.com"
+            and "/apiv2-files/sign-obj/" in unquote(response.url)
+        )
+
+    async with page.expect_response(is_file_response, timeout=timeout) as response_info:
+        await card.click(timeout=timeout)
+    captured_response = await response_info.value
+    signed_url = captured_response.url
+    if urlparse(signed_url).netloc.lower() == "view.officeapps.live.com":
+        signed_url = parse_qs(urlparse(signed_url).query).get("src", [""])[0]
+    response = await page.request.get(signed_url, timeout=timeout)
+    try:
+        if not response.ok:
+            raise RuntimeError(f"Kimi file HTTP {response.status}")
+        headers = dict(response.headers or {})
+        headers["content-disposition"] = (
+            "attachment; filename*=UTF-8''"
+            f"{quote(candidate.filename, safe='')}"
+        )
+        return await response.body(), headers
+    finally:
+        await page.keyboard.press("Escape")
+
+
+async def _gemini_document_card_download(
+    page: Any,
+    candidate: DocumentCandidate,
+    timeout: int,
+) -> tuple[bytes, dict[str, str]]:
+    """点击 Gemini 文件卡片并通过查看器的原生下载按钮取回文件。"""
+    cards = page.locator("user-query-file-preview")
+    card = cards.filter(has_text=Path(candidate.filename).stem).first
+    if await card.count() == 0:
+        card = cards.locator(
+            f'button[aria-label="{candidate.filename}"]'
+        ).first
+    await card.locator("button").first.click(timeout=timeout)
+    if Path(candidate.filename).suffix.lower() in {".doc", ".docx"}:
+        await page.wait_for_timeout(3000)
+    download_button = page.locator('[role="dialog"] [aria-label="下载"]').first
+    try:
+        await download_button.wait_for(state="visible", timeout=timeout)
+        async with page.expect_download(timeout=timeout) as download_info:
+            await download_button.click()
+        download = await download_info.value
+        path = await download.path()
+        body = Path(path).read_bytes()
+        return body, {
+            "content-disposition": (
+                f'attachment; filename="{download.suggested_filename}"'
+            )
+        }
+    finally:
+        dialog = page.locator('[role="dialog"]').first
+        close_button = dialog.locator('[aria-label="关闭"]').first
+        if await close_button.count():
+            await close_button.click()
+            await dialog.wait_for(state="hidden", timeout=timeout)
+        else:
+            await page.keyboard.press("Escape")
+
+
 async def _download_document_candidates(
     page: Any,
     candidates: list[DocumentCandidate],
@@ -2361,12 +2567,22 @@ async def _download_document_candidates(
         candidate.reference.startswith(DEEPSEEK_CARD_REFERENCE_PREFIX)
         for candidate in ordered
     )
+    has_gemini_card_candidates = any(
+        candidate.reference.startswith(GEMINI_CARD_REFERENCE_PREFIX)
+        for candidate in ordered
+    )
+    has_kimi_card_candidates = any(
+        candidate.reference.startswith(KIMI_CARD_REFERENCE_PREFIX)
+        for candidate in ordered
+    )
     effective_concurrency = (
         1
         if (
             has_chatgpt_candidates
             or has_doubao_candidates
             or has_deepseek_card_candidates
+            or has_gemini_card_candidates
+            or has_kimi_card_candidates
         )
         else max(1, min(int(concurrency), 4))
     )
@@ -2407,6 +2623,12 @@ async def _download_document_candidates(
                         DEEPSEEK_CARD_REFERENCE_PREFIX
                     )
                 )
+                is_gemini_card_candidate = (
+                    candidate.reference.startswith(GEMINI_CARD_REFERENCE_PREFIX)
+                )
+                is_kimi_card_candidate = (
+                    candidate.reference.startswith(KIMI_CARD_REFERENCE_PREFIX)
+                )
                 is_chatgpt_direct_candidate = (
                     candidate_host in {"chatgpt.com", "chat.openai.com"}
                     and bool(re.match(
@@ -2422,6 +2644,16 @@ async def _download_document_candidates(
                     response = await _deepseek_document_card_get(
                         page, candidate, 20000
                     )
+                elif is_gemini_card_candidate:
+                    body, headers = await _gemini_document_card_download(
+                        page, candidate, 60000
+                    )
+                    return candidate, body, headers, None
+                elif is_kimi_card_candidate:
+                    body, headers = await _kimi_document_card_download(
+                        page, candidate, 60000
+                    )
+                    return candidate, body, headers, None
                 elif is_chatgpt_direct_candidate:
                     response = await _authenticated_page_get(
                         page, candidate.url, 20000
@@ -2508,6 +2740,8 @@ async def _download_document_candidates(
         has_chatgpt_candidates
         or has_doubao_candidates
         or has_deepseek_card_candidates
+        or has_gemini_card_candidates
+        or has_kimi_card_candidates
     ):
         results = []
         downloaded_names: set[str] = set()
@@ -2964,6 +3198,7 @@ async def fetch_chat_pipeline(
                         if (
                             alt == "asset cover"
                             or "doc-canvas-card-fallback" in src.lower()
+                            or "drive-thirdparty.googleusercontent.com" in src.lower()
                         ):
                             continue
                         image_candidates.append(src)
@@ -3001,6 +3236,12 @@ async def fetch_chat_pipeline(
                 ]))
                 document_candidates.extend(
                     _extract_chatgpt_document_card_candidates(html, page.url)
+                )
+                document_candidates.extend(
+                    _extract_gemini_document_card_candidates(html, page.url)
+                )
+                document_candidates.extend(
+                    _extract_kimi_document_card_candidates(html, page.url)
                 )
                 document_candidates = list(dict.fromkeys(document_candidates))
                 existing_document_names = {

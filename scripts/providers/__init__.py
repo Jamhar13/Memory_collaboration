@@ -37,9 +37,9 @@ async def collect_virtualized_html(page):
 
 
 def parse_messages(soup, image_map):
-    """返回 (provider, messages)；未识别平台时返回 (None, None)。"""
+    """返回 (provider, messages)；每个适配器使用独立 DOM，避免探测时互相污染。"""
     for provider in PROVIDERS:
-        messages = provider.parse_messages(soup, image_map)
+        messages = provider.parse_messages(soup.__copy__(), image_map)
         if messages is not None:
             return provider, messages
     return None, None
