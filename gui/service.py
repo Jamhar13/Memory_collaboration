@@ -75,6 +75,9 @@ QIANWEN_HOSTS = {"qianwen.com", "www.qianwen.com", "qianwen.my.cn"}
 QIANWEN_PRIVATE_CONVERSATION_PATTERN = re.compile(
     r"^/chat(?:[/?]|$)"
 )
+# 豆包：公开分享 /thread/<id> 无需登录；账号内会话 /chat/<id> 需登录。
+DOUBAO_HOSTS = {"doubao.com", "www.doubao.com"}
+DOUBAO_PRIVATE_CONVERSATION_PATTERN = re.compile(r"^/chat/\d{8,}/?$")
 # Grok：grok.com。公开分享 /share/<id> 无需登录；私有会话 /c/<uuid> 需登录。
 GROK_HOSTS = {"grok.com", "www.grok.com"}
 GROK_PRIVATE_CONVERSATION_PATTERN = re.compile(r"^/c/[0-9a-f-]{8,}")
@@ -373,6 +376,7 @@ async def _page_has_conversation_content(page: Any, page_url: str) -> bool:
     current = urlparse(getattr(page, "url", page_url))
     current_host = current.netloc.lower().split(":", 1)[0]
     private_checks = (
+        (DOUBAO_HOSTS, DOUBAO_PRIVATE_CONVERSATION_PATTERN),
         (GEMINI_HOSTS, GEMINI_PRIVATE_CONVERSATION_PATTERN),
         (KIMI_HOSTS, KIMI_PRIVATE_CONVERSATION_PATTERN),
         (QIANWEN_HOSTS, QIANWEN_PRIVATE_CONVERSATION_PATTERN),
@@ -432,6 +436,8 @@ def requires_authenticated_browser(url: str) -> bool:
         return bool(PRIVATE_CONVERSATION_PATTERNS[0].match(parsed.path))
     if host == "chat.deepseek.com":
         return bool(PRIVATE_CONVERSATION_PATTERNS[1].match(parsed.path))
+    if host in DOUBAO_HOSTS:
+        return bool(DOUBAO_PRIVATE_CONVERSATION_PATTERN.match(parsed.path))
     if host in GEMINI_HOSTS:
         return bool(GEMINI_PRIVATE_CONVERSATION_PATTERN.match(parsed.path))
     if host in KIMI_HOSTS:
@@ -2145,9 +2151,11 @@ async def _chatgpt_document_card_file_id(
 
 
 def _deepseek_document_card_locator(page: Any, filename: str):
-    return page.get_by_text(filename, exact=True).locator(
-        "xpath=ancestor::*[@tabindex='0'][1]"
-    )
+    return page.locator("[data-virtual-list-item-key] .ds-message").filter(
+        has=page.get_by_text(filename, exact=True)
+    ).locator("div").filter(has=page.get_by_text(filename, exact=True)).filter(
+        has=page.get_by_text(re.compile(r"^(?:PDF|DOCX?|XLSX?|PPTX?|TXT|CSV|MD|RTF)\s"))
+    ).first
 
 
 async def _scroll_to_deepseek_file_card(
@@ -2224,18 +2232,41 @@ async def _deepseek_document_card_get(
         return None
     if not await _scroll_to_deepseek_file_card(page, candidate.filename):
         return None
-    cards = _deepseek_document_card_locator(page, candidate.filename)
+    name = page.locator("[data-virtual-list-item-key] .ds-message").filter(
+        has=page.get_by_text(candidate.filename, exact=True)
+    ).get_by_text(candidate.filename, exact=True).first
     try:
-        async with page.expect_response(
-            lambda response: (
-                urlparse(response.url).netloc.lower().split(":", 1)[0]
-                == "files.deepseeksvc.com"
-                and urlparse(response.url).path == "/api/file"
-            ),
-            timeout=min(timeout, 15000),
-        ) as response_info:
-            await cards.first.click(force=True, timeout=5000)
-        return await response_info.value
+        signed_path = await name.evaluate(
+            """element => {
+                const seen = new WeakSet();
+                const find = value => {
+                    if (!value || typeof value !== 'object' || seen.has(value)) return '';
+                    seen.add(value);
+                    if (typeof value.signedPath === 'string') return value.signedPath;
+                    for (const child of Object.values(value)) {
+                        const found = find(child);
+                        if (found) return found;
+                    }
+                    return '';
+                };
+                for (let node = element; node; node = node.parentElement) {
+                    for (const key of Object.keys(node)) {
+                        if (key.startsWith('__reactProps')) {
+                            const found = find(node[key]);
+                            if (found) return found;
+                        }
+                    }
+                }
+                return '';
+            }"""
+        )
+        if not signed_path:
+            return None
+        download_url = "https://files.deepseeksvc.com/api/" + signed_path.lstrip("/")
+        separator = "&" if "?" in download_url else "?"
+        if not re.search(r"(?:[?&])ty=", download_url):
+            download_url = f"{download_url}{separator}ty=r"
+        return await _authenticated_page_get(page, download_url, timeout)
     except Exception:
         return None
 

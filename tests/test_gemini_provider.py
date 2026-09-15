@@ -356,6 +356,12 @@ class GeminiAuthRoutingTests(unittest.TestCase):
         self.assertFalse(requires_authenticated_browser(
             "https://www.doubao.com/thread/abc123"
         ))
+        self.assertTrue(requires_authenticated_browser(
+            "https://www.doubao.com/chat/38441607137483266"
+        ))
+        self.assertFalse(requires_authenticated_browser(
+            "https://www.doubao.com/chat"
+        ))
 
 
 if __name__ == "__main__":

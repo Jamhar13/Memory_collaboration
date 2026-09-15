@@ -9,7 +9,7 @@ import unittest
 from pathlib import Path
 import tempfile
 from types import SimpleNamespace
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 from bs4 import BeautifulSoup
 
 from gui.service import (
@@ -18,6 +18,7 @@ from gui.service import (
     _close_browser_context_safely,
     _collect_response_assets,
     _document_download_url_from_payload,
+    _deepseek_document_card_get,
     _download_document_candidates,
     _download_image_candidates,
     _extract_chatgpt_document_card_candidates,
@@ -916,6 +917,39 @@ class GUIServiceTests(unittest.TestCase):
         self.assertEqual(len(candidates), 1)
         self.assertEqual(candidates[0].filename, "mddd.md")
         self.assertTrue(candidates[0].reference.startswith("deepseek-card:"))
+
+    def test_deepseek_document_card_uses_react_signed_path(self):
+        signed_path = "/file?file_id=xlsx-id&state=signed"
+        name = MagicMock()
+        name.evaluate = AsyncMock(return_value=signed_path)
+        message = MagicMock()
+        message.get_by_text.return_value.first = name
+        page = MagicMock()
+        page.locator.return_value.filter.return_value = message
+        candidate = DocumentCandidate(
+            "deepseek-card:result1.xlsx",
+            "https://chat.deepseek.com/a/chat/s/example",
+            "result1.xlsx",
+        )
+
+        with patch(
+            "gui.service._scroll_to_deepseek_file_card",
+            new=AsyncMock(return_value=True),
+        ), patch(
+            "gui.service._authenticated_page_get",
+            new=AsyncMock(return_value="response"),
+        ) as request:
+            response = asyncio.run(_deepseek_document_card_get(
+                page, candidate, 20000
+            ))
+
+        self.assertEqual(response, "response")
+        request.assert_awaited_once_with(
+            page,
+            "https://files.deepseeksvc.com/api/file?"
+            "file_id=xlsx-id&state=signed&ty=r",
+            20000,
+        )
 
 
     def test_doubao_response_metadata_produces_authorized_candidate(self):
