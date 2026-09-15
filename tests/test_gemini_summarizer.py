@@ -1706,6 +1706,45 @@ output = "Harry Potter_translated.pdf"</pre>
         self.assertNotIn("## 重点主题详情", without_selection)
         self.assertNotIn("只属于代码主题的重点细节", without_selection)
 
+    def test_summary_markdown_links_every_media_reference(self):
+        result = {
+            "model": "test-model", "source": "DeepSeek.md",
+            "conversation": {
+                "message_count": 2, "chunk_count": 1,
+                "conversation_types": ["document_analysis"],
+            },
+            "overall_summary": "附件测试。",
+            "current_state": {}, "topics": [], "memory_items": [],
+            "typed_records": {}, "query_index": [],
+            "media": [{
+                "media_id": "M001", "message_index": 1,
+                "kind": "document", "source_role": "user",
+                "label": "result1.xlsx",
+                "reference": "./AI_memory_summary_files/result1.xlsx",
+                "status": "unavailable", "can_reverify": True,
+                "description": "格式暂未接入解析。",
+            }, {
+                "media_id": "M002", "message_index": 2,
+                "kind": "image", "source_role": "user",
+                "label": "用户图片",
+                "reference": "./AI_memory_summary_images/image.png",
+                "status": "described", "can_reverify": True,
+                "description": "图片内容。",
+            }],
+            "processing": {"warnings": []},
+        }
+
+        rendered = summary.render_summary_markdown(result)
+
+        self.assertIn(
+            "- 文件：[result1.xlsx](./AI_memory_summary_files/result1.xlsx)",
+            rendered,
+        )
+        self.assertIn(
+            "- 图片：![用户图片](./AI_memory_summary_images/image.png)",
+            rendered,
+        )
+
     def test_default_outputs_and_v8_structure(self):
         messages = [
             {"role": "User", "content": "请解决报错"},

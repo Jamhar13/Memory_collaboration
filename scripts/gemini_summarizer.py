@@ -5673,6 +5673,11 @@ def render_summary_markdown(
                         else "用户消息"
                     ),
                     f"- 标签：{asset['label']}",
+                    (
+                        f"- 图片：![{asset['label']}]({asset['reference']})"
+                        if asset.get("kind") == "image"
+                        else f"- 文件：[{asset['label']}]({asset['reference']})"
+                    ) if asset.get("reference") else "- 文件：（无可用链接）",
                     f"- 状态：{asset['status']}；{availability}",
                     f"- 内容说明：{_media_description_for_markdown(asset)}",
                 ])

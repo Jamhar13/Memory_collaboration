@@ -2941,14 +2941,14 @@ async def fetch_chat_pipeline(
         )
     requires_login_probe = requires_authenticated_browser(url)
     requested_host = urlparse(url).netloc.lower().split(":", 1)[0]
-    chatgpt_minimized = (
+    chatgpt_no_login = (
         not need_login
         and requires_login_probe
         and requested_host in {"chatgpt.com", "chat.openai.com"}
     )
-    headless = not need_login and not chatgpt_minimized
+    headless = not need_login
 
-    viewport_config = None if need_login or chatgpt_minimized else {
+    viewport_config = None if need_login else {
         "width": 1920,
         "height": 10800
     }
@@ -2956,8 +2956,6 @@ async def fetch_chat_pipeline(
     if logger:
         if need_login:
             logger("正在启动浏览器供您登录或读取已保存的登录状态...")
-        elif chatgpt_minimized:
-            logger("正在最小化浏览器中读取已保存的 ChatGPT 登录状态...")
         elif requires_login_probe:
             logger("正在后台读取已保存的 AI 登录状态...")
         else:
@@ -2969,14 +2967,12 @@ async def fetch_chat_pipeline(
                 playwright,
                 headless=headless,
                 viewport=viewport_config,
-                no_viewport=need_login or chatgpt_minimized,
-                start_minimized=chatgpt_minimized,
+                no_viewport=need_login,
+                start_minimized=False,
                 logger=logger,
                 profile_root=browser_profile_root,
             )
             page = context.pages[0] if context.pages else await context.new_page()
-            if chatgpt_minimized:
-                await _set_browser_window_state(page, "minimized")
             response_document_candidates: list[DocumentCandidate] = []
             response_image_references: set[str] = set()
             response_tasks: set[asyncio.Task] = set()
@@ -3024,12 +3020,19 @@ async def fetch_chat_pipeline(
                         or bool(authorized_content_responses)
                     )
                     if content_ready:
-                        if requested_host in {"chatgpt.com", "chat.openai.com"}:
+                        if need_login and requested_host in {
+                            "chatgpt.com", "chat.openai.com"
+                        }:
                             await _set_browser_window_state(page, "minimized")
                         if logger:
                             logger("已复用此前保存的登录状态，无需重复授权。")
                     else:
-                        if not need_login and not chatgpt_minimized:
+                        if chatgpt_no_login:
+                            raise RuntimeError(
+                                "该 ChatGPT 私有会话需要授权登录；"
+                                "请选择“授权登录”后重试。"
+                            )
+                        elif not need_login:
                             if logger:
                                 logger(
                                     "该平台无法在无界面模式读取会话，"
@@ -3075,7 +3078,7 @@ async def fetch_chat_pipeline(
                         elif not need_login:
                             need_login = True
                             await _set_browser_window_state(page, "normal")
-                        if not content_ready:
+                        if not content_ready and not chatgpt_no_login:
                             if logger:
                                 logger(
                                     "当前登录状态无法读取该会话，请在浏览器中登录后"
