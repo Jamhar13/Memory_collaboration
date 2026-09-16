@@ -1054,9 +1054,9 @@ async def _chatgpt_message_asset_groups(
             """() => {
                 const root = window.__reactRouterDataRouter?.state?.loaderData;
                 const seen = new WeakSet();
-                let linear = null;
+                let conversation = null;
                 function find(value) {
-                    if (linear || !value || typeof value !== "object"
+                    if (conversation || !value || typeof value !== "object"
                         || seen.has(value)) return;
                     seen.add(value);
                     if (Array.isArray(value)) {
@@ -1064,13 +1064,26 @@ async def _chatgpt_message_asset_groups(
                         return;
                     }
                     if (Array.isArray(value.linear_conversation)) {
-                        linear = value.linear_conversation;
+                        conversation = value.linear_conversation;
                         return;
+                    }
+                    if (value.mapping && typeof value.mapping === "object") {
+                        const nodes = Object.values(value.mapping);
+                        if (nodes.some(item => item?.message)) {
+                            const branch = [];
+                            let node = value.mapping[value.current_node];
+                            while (node) {
+                                branch.push(node);
+                                node = value.mapping[node.parent];
+                            }
+                            conversation = branch.length ? branch.reverse() : nodes;
+                            return;
+                        }
                     }
                     for (const item of Object.values(value)) find(item);
                 }
                 find(root);
-                return (linear || [])
+                return (conversation || [])
                     .filter(item => item?.message?.author?.role === "user")
                     .map(item => {
                         const message = item.message;
@@ -1225,6 +1238,7 @@ async def _download_image_candidates(
     image_reference_prefix: str,
     concurrency: int = GUI_IMAGE_DOWNLOAD_CONCURRENCY,
     warning_collector: Optional[list[str]] = None,
+    authentication_required: Optional[list[bool]] = None,
 ) -> dict[str, str]:
     """复用已有文件并受限并发下载唯一真实图片，稳定保持 DOM 顺序。"""
     images_dir = Path(images_dir)
@@ -1262,17 +1276,58 @@ async def _download_image_candidates(
                             payload = await response.json()
                             download_url = _document_download_url_from_payload(payload)
                             if not download_url:
-                                failure_reason = "not_an_image"
-                                continue
+                                parsed = urlparse(src)
+                                if (
+                                    payload.get("error_code") == "safety_check_failed"
+                                    and parsed.netloc.lower().split(":", 1)[0]
+                                    in {"chatgpt.com", "chat.openai.com"}
+                                    and parsed.path.startswith(
+                                        "/backend-api/files/download/"
+                                    )
+                                ):
+                                    download_url = parsed._replace(
+                                        query=(
+                                            "post_id=&inline=false&"
+                                            "download_intent=false"
+                                        )
+                                    ).geturl()
+                                else:
+                                    failure_reason = "not_an_image"
+                                    continue
                             response = await _authenticated_page_get(
                                 page, download_url, GUI_IMAGE_DOWNLOAD_TIMEOUT_MS
                             )
                             if not response.ok:
                                 status = getattr(response, "status", None)
+                                if (
+                                    status in {401, 403}
+                                    and authentication_required is not None
+                                ):
+                                    authentication_required[:] = [True]
+                                    return src, None, f"http_{status}"
                                 failure_reason = (
                                     f"http_{status}" if status else "http_error"
                                 )
                                 continue
+                            retry_type = dict(
+                                getattr(response, "headers", {}) or {}
+                            ).get("content-type", "").split(";", 1)[0].lower()
+                            if retry_type == "application/json":
+                                download_url = _document_download_url_from_payload(
+                                    await response.json()
+                                )
+                                if not download_url:
+                                    failure_reason = "not_an_image"
+                                    continue
+                                response = await _authenticated_page_get(
+                                    page, download_url, GUI_IMAGE_DOWNLOAD_TIMEOUT_MS
+                                )
+                                if not response.ok:
+                                    status = getattr(response, "status", None)
+                                    failure_reason = (
+                                        f"http_{status}" if status else "http_error"
+                                    )
+                                    continue
                         body = await response.body()
                         if _is_supported_image_body(body):
                             return src, body, None
@@ -2763,6 +2818,14 @@ async def _download_document_candidates(
                 except Exception:
                     return candidate, None, headers, "not_a_document"
                 download_url = _document_download_url_from_payload(payload)
+                if (
+                    not download_url
+                    and payload.get("error_code") == "safety_check_failed"
+                    and is_chatgpt_direct_candidate
+                ):
+                    download_url = parsed_candidate._replace(
+                        query="post_id=&inline=false&download_intent=false"
+                    ).geturl()
                 if not download_url:
                     return candidate, None, headers, "not_a_document"
                 response = await _authenticated_page_get(
@@ -2901,6 +2964,7 @@ async def fetch_chat_pipeline(
     need_login: bool = False,
     login_ready_event: Optional[asyncio.Event] = None,
     login_required_callback: Optional[Callable[[], None]] = None,
+    login_confirmation_callback: Optional[Callable[[], bool]] = None,
     logger: Optional[Callable[[str], None]] = None,
     image_output_dir: Optional[Path] = None,
     image_reference_base: Optional[Path] = None,
@@ -3028,10 +3092,37 @@ async def fetch_chat_pipeline(
                             logger("已复用此前保存的登录状态，无需重复授权。")
                     else:
                         if chatgpt_no_login:
-                            raise RuntimeError(
-                                "该 ChatGPT 私有会话需要授权登录；"
-                                "请选择“授权登录”后重试。"
+                            if (
+                                login_confirmation_callback is None
+                                or not login_confirmation_callback()
+                            ):
+                                raise RuntimeError(
+                                    "该 ChatGPT 私有会话需要授权登录；"
+                                    "已取消打开登录浏览器。"
+                                )
+                            chatgpt_no_login = False
+                            need_login = True
+                            await _close_browser_context_safely(
+                                context, fetch_warnings, logger
                             )
+                            context, _browser_channel = (
+                                await launch_browser_context(
+                                    playwright,
+                                    headless=False,
+                                    viewport=None,
+                                    no_viewport=True,
+                                    start_minimized=False,
+                                    logger=logger,
+                                    profile_root=browser_profile_root,
+                                )
+                            )
+                            page = (
+                                context.pages[0]
+                                if context.pages
+                                else await context.new_page()
+                            )
+                            page.on("response", capture_response_assets)
+                            await goto_with_retry_gui(page, url, logger=logger)
                         elif not need_login:
                             if logger:
                                 logger(
@@ -3264,14 +3355,66 @@ async def fetch_chat_pipeline(
                         image_candidates.append(src)
 
                 download_started = time.perf_counter()
+                image_warnings: list[str] = []
+                image_authentication_required: list[bool] = []
                 image_map = await _download_image_candidates(
                     page,
                     image_candidates,
                     resolved_images_dir,
                     image_reference_prefix,
                     image_download_concurrency,
-                    fetch_warnings,
+                    image_warnings,
+                    image_authentication_required,
                 )
+                if (
+                    image_authentication_required
+                    and login_required_callback is not None
+                    and login_ready_event is not None
+                    and login_confirmation_callback is not None
+                    and login_confirmation_callback()
+                ):
+                    if logger:
+                        logger(
+                            "已确认登录，正在打开浏览器；登录后请点击"
+                            "【登录完毕】..."
+                        )
+                    await _close_browser_context_safely(
+                        context, fetch_warnings, logger
+                    )
+                    context, _browser_channel = await launch_browser_context(
+                        playwright,
+                        headless=False,
+                        viewport=None,
+                        no_viewport=True,
+                        start_minimized=False,
+                        logger=logger,
+                        profile_root=browser_profile_root,
+                    )
+                    page = (
+                        context.pages[0]
+                        if context.pages
+                        else await context.new_page()
+                    )
+                    page.on("response", capture_response_assets)
+                    await goto_with_retry_gui(page, url, logger=logger)
+                    login_ready_event.clear()
+                    login_required_callback()
+                    login_wait_started = time.perf_counter()
+                    await login_ready_event.wait()
+                    user_wait_seconds += time.perf_counter() - login_wait_started
+                    await goto_with_retry_gui(page, url, logger=logger)
+                    await page.wait_for_timeout(1800)
+                    image_warnings.clear()
+                    image_map = await _download_image_candidates(
+                        page,
+                        image_candidates,
+                        resolved_images_dir,
+                        image_reference_prefix,
+                        image_download_concurrency,
+                        image_warnings,
+                    )
+                    await _set_browser_window_state(page, "minimized")
+                fetch_warnings.extend(image_warnings)
                 if logger:
                     usable_sources = _ordered_image_sources(image_candidates)
                     logger(
@@ -3410,6 +3553,20 @@ async def fetch_chat_pipeline(
                 )
                 soup = BeautifulSoup(html, "html.parser")
                 parser_asset_map = {**image_map, **document_map}
+                if _chatgpt_shared_conversation_id(url):
+                    for candidate in document_candidates:
+                        if candidate.filename.lower() in parser_asset_map:
+                            continue
+                        parsed_candidate = urlparse(candidate.url)
+                        if (
+                            parsed_candidate.netloc.lower().split(":", 1)[0]
+                            in {"chatgpt.com", "chat.openai.com"}
+                            and re.match(
+                                r"^/backend-api/files/download/[^/]+$",
+                                parsed_candidate.path,
+                            )
+                        ):
+                            parser_asset_map[candidate.filename.lower()] = candidate.url
                 provider, parsed_messages = parse_messages(
                     soup, parser_asset_map
                 )

@@ -13,6 +13,32 @@ from scripts import gemini_summarizer as summary
 from scripts.providers import chatgpt, deepseek, doubao
 
 
+class LocalAssetPathTests(unittest.TestCase):
+    def test_file_uri_is_not_prefixed_with_project_directory(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            asset = Path(temp_dir) / "image.png"
+            asset.write_bytes(b"image")
+            reference = asset.as_uri()
+
+            project_dir = Path(temp_dir) / "project"
+            self.assertEqual(
+                summary._resolve_local_asset(
+                    reference,
+                    project_dir=project_dir,
+                    source_dir=Path(temp_dir),
+                ),
+                asset.resolve(),
+            )
+            self.assertEqual(
+                summary._resolve_local_asset(
+                    str(asset),
+                    project_dir=project_dir,
+                    source_dir=Path(temp_dir),
+                ),
+                asset.resolve(),
+            )
+
+
 class FakeGateway:
     def __init__(self):
         self.calls = []

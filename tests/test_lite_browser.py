@@ -125,6 +125,7 @@ class LiteBrowserSelectionTests(unittest.IsolatedAsyncioTestCase):
             ):
                 contexts = [FakeContext()]
                 callback = Mock()
+                confirmation_callback = Mock(return_value=False)
                 login_event = asyncio.Event()
                 login_event.set()
                 launcher = AsyncMock(side_effect=[
@@ -156,6 +157,7 @@ class LiteBrowserSelectionTests(unittest.IsolatedAsyncioTestCase):
                             need_login=False,
                             login_ready_event=login_event,
                             login_required_callback=callback,
+                            login_confirmation_callback=confirmation_callback,
                         )
                     else:
                         result = await fetch_chat_pipeline(
@@ -164,6 +166,7 @@ class LiteBrowserSelectionTests(unittest.IsolatedAsyncioTestCase):
                             need_login=False,
                             login_ready_event=login_event,
                             login_required_callback=callback,
+                            login_confirmation_callback=confirmation_callback,
                         )
                         self.assertIn("需要授权登录", result.error)
 
@@ -178,3 +181,7 @@ class LiteBrowserSelectionTests(unittest.IsolatedAsyncioTestCase):
                     launcher.await_args_list[0].kwargs["start_minimized"]
                 )
                 self.assertEqual(callback.call_count, 0)
+                self.assertEqual(
+                    confirmation_callback.call_count,
+                    0 if has_conversation_content else 1,
+                )

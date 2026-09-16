@@ -1443,14 +1443,26 @@ def _resolve_local_asset(
     project_dir: Path,
     source_dir: Path
 ) -> Path | None:
-    clean_reference = unquote(urlparse(reference).path).replace("/", os.sep)
+    parsed = urlparse(reference)
+    clean_reference = (
+        reference
+        if re.match(r"^[A-Za-z]:[\\/]", reference)
+        else unquote(parsed.path)
+    )
+    if re.match(r"^/[A-Za-z]:[\\/]", clean_reference):
+        clean_reference = clean_reference[1:]
+    clean_reference = clean_reference.replace("/", os.sep)
     reference_path = Path(clean_reference)
-    candidates = [
-        source_dir / reference_path,
-        project_dir / reference_path,
-        project_dir / "images" / reference_path.name,
-        source_dir / "images" / reference_path.name
-    ]
+    candidates = (
+        [reference_path]
+        if reference_path.is_absolute()
+        else [
+            source_dir / reference_path,
+            project_dir / reference_path,
+            project_dir / "images" / reference_path.name,
+            source_dir / "images" / reference_path.name
+        ]
+    )
 
     allowed_roots = {
         project_dir.resolve(),

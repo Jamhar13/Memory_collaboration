@@ -232,6 +232,104 @@ class GUIServiceTests(unittest.TestCase):
 
         self.assertEqual(request.calls, [source, signed])
 
+    def test_image_download_retries_owned_chatgpt_file_without_share_scope(self):
+        share_id = "6aa95199-4040-83e8-b16a-4be411338d94"
+        source = (
+            "https://chatgpt.com/backend-api/files/download/file_image"
+            f"?shared_conversation_id={share_id}"
+        )
+        private_source = (
+            "https://chatgpt.com/backend-api/files/download/file_image"
+            "?post_id=&inline=false&download_intent=false"
+        )
+
+        class FakeResponse:
+            ok = True
+            status = 200
+
+            def __init__(self, payload, content_type):
+                self.payload = payload
+                self.headers = {"content-type": content_type}
+
+            async def body(self):
+                return self.payload
+
+            async def json(self):
+                return {"error_code": "safety_check_failed"}
+
+        class FakeRequest:
+            def __init__(self):
+                self.calls = []
+
+            async def get(self, src, timeout):
+                self.calls.append(src)
+                if src == source:
+                    return FakeResponse(b"{}", "application/json")
+                if src == private_source:
+                    response = FakeResponse(b"{}", "application/json")
+                    response.json = lambda: asyncio.sleep(
+                        0, result={"download_url": "https://example.com/signed.png"}
+                    )
+                    return response
+                return FakeResponse(b"\x89PNG\r\n\x1a\nreal", "image/png")
+
+        request = FakeRequest()
+        with tempfile.TemporaryDirectory() as temp_dir:
+            image_map = asyncio.run(_download_image_candidates(
+                SimpleNamespace(request=request),
+                [source],
+                Path(temp_dir),
+                "./assets",
+            ))
+            saved = Path(temp_dir) / Path(image_map[source]).name
+            self.assertEqual(saved.read_bytes(), b"\x89PNG\r\n\x1a\nreal")
+
+        self.assertEqual(
+            request.calls,
+            [source, private_source, "https://example.com/signed.png"],
+        )
+
+    def test_image_download_reports_chatgpt_login_requirement(self):
+        share_id = "6aa93ca3-11c0-83e8-9c36-afa39378a735"
+        source = (
+            "https://chatgpt.com/backend-api/files/download/file_image"
+            f"?shared_conversation_id={share_id}"
+        )
+
+        class FakeResponse:
+            def __init__(self, ok, status, payload):
+                self.ok = ok
+                self.status = status
+                self.payload = payload
+                self.headers = {"content-type": "application/json"}
+
+            async def json(self):
+                return self.payload
+
+        class FakeRequest:
+            async def get(self, src, timeout):
+                if "shared_conversation_id" in src:
+                    return FakeResponse(
+                        True, 200, {"error_code": "safety_check_failed"}
+                    )
+                return FakeResponse(False, 403, {"detail": "Forbidden"})
+
+        authentication_required = []
+        warnings = []
+        with tempfile.TemporaryDirectory() as temp_dir:
+            image_map = asyncio.run(_download_image_candidates(
+                SimpleNamespace(request=FakeRequest()),
+                [source],
+                Path(temp_dir),
+                "./assets",
+                warning_collector=warnings,
+                authentication_required=authentication_required,
+            ))
+
+        self.assertEqual(image_map, {})
+        self.assertEqual(authentication_required, [True])
+        self.assertIn("http_403", warnings[0])
+
     def test_browser_cleanup_failure_becomes_warning(self):
         class BrokenContext:
             async def close(self):
@@ -714,6 +812,57 @@ class GUIServiceTests(unittest.TestCase):
             self.assertEqual(saved[0].read_bytes(), b"PK\x03\x04fake-docx")
             self.assertEqual(mapping["报告.docx"], "./result_files/%E6%8A%A5%E5%91%8A.docx")
             self.assertNotIn("secret", " ".join(mapping.values()))
+
+    def test_chatgpt_document_retries_without_share_scope(self):
+        share_id = "6aa93ca3-11c0-83e8-9c36-afa39378a735"
+        source = (
+            "https://chatgpt.com/backend-api/files/download/file_csv"
+            f"?shared_conversation_id={share_id}"
+        )
+        private_source = (
+            "https://chatgpt.com/backend-api/files/download/file_csv"
+            "?post_id=&inline=false&download_intent=false"
+        )
+
+        class FakeResponse:
+            ok = True
+            status = 200
+
+            def __init__(self, payload, content_type):
+                self.payload = payload
+                self.headers = {"content-type": content_type}
+
+            async def body(self):
+                return self.payload
+
+            async def json(self):
+                return {"error_code": "safety_check_failed"}
+
+        class FakeRequest:
+            def __init__(self):
+                self.calls = []
+
+            async def get(self, url, timeout):
+                self.calls.append(url)
+                if url == source:
+                    return FakeResponse(b"{}", "application/json")
+                return FakeResponse(b"a,b\n1,2\n", "text/csv")
+
+        request = FakeRequest()
+        candidate = DocumentCandidate("file_csv", source, "data.csv")
+        with tempfile.TemporaryDirectory() as temp_dir:
+            output_dir = Path(temp_dir) / "result_files"
+            mapping = asyncio.run(_download_document_candidates(
+                SimpleNamespace(request=request),
+                [candidate],
+                output_dir,
+                "./result_files",
+                conversation_url=f"https://chatgpt.com/share/{share_id}",
+            ))
+            self.assertEqual((output_dir / "data.csv").read_bytes(), b"a,b\n1,2\n")
+
+        self.assertEqual(request.calls, [source, private_source])
+        self.assertEqual(mapping["data.csv"], "./result_files/data.csv")
 
     def test_document_candidates_reject_local_and_credential_urls(self):
         html = (
@@ -1282,7 +1431,11 @@ class GUIServiceTests(unittest.TestCase):
         share_id = "6a5ed6e7-bd38-83ee-936d-571f7594a63e"
 
         class FakePage:
-            async def evaluate(self, _script):
+            def __init__(self):
+                self.script = ""
+
+            async def evaluate(self, script):
+                self.script = script
                 return [
                     {
                         "images": [
@@ -1302,11 +1455,13 @@ class GUIServiceTests(unittest.TestCase):
                     },
                 ]
 
+        page = FakePage()
         image_groups, document_groups = asyncio.run(
             _chatgpt_message_asset_groups(
-                FakePage(), f"https://chatgpt.com/share/{share_id}"
+                page, f"https://chatgpt.com/share/{share_id}"
             )
         )
+        self.assertIn("value.mapping", page.script)
         html = (
             '<div data-message-author-role="user">第一问</div>'
             '<div data-message-author-role="user">第二问</div>'
