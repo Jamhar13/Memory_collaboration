@@ -36,6 +36,7 @@ from gui.service import (
     _inject_chatgpt_shared_images,
     _chatgpt_message_asset_groups,
     _normalize_doubao_ai_document_text,
+    _parse_page_messages,
     _rehydrate_chatgpt_conversation,
     _repair_downloaded_text_mojibake,
     _set_browser_window_state,
@@ -646,6 +647,19 @@ class GUIServiceTests(unittest.TestCase):
         soup = BeautifulSoup(html, "html.parser")
         messages = parse_fallback_messages_gui(soup)
         self.assertTrue(len(messages) >= 1)
+
+    def test_doubao_shell_is_not_parsed_as_conversation(self):
+        soup = BeautifulSoup(
+            "<html><title>豆包 - 你的 AI 智能助手</title></html>",
+            "html.parser",
+        )
+        provider, messages = _parse_page_messages(
+            "https://www.doubao.com/thread/example",
+            soup,
+            {},
+        )
+        self.assertIsNone(provider)
+        self.assertIsNone(messages)
 
     def test_generate_raw_markdown(self):
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -1320,7 +1334,9 @@ class GUIServiceTests(unittest.TestCase):
             '&amp;quot;file&amp;quot;:{'
             '&amp;quot;name&amp;quot;:&amp;quot;课堂材料.docx&amp;quot;,'
             '&amp;quot;uri&amp;quot;:'
-            '&amp;quot;tos-cn-i-test/folder/material.docx&amp;quot;}'
+            '&amp;quot;tos-cn-i-test/folder/material.docx&amp;quot;,'
+            '&amp;quot;url&amp;quot;:'
+            '&amp;quot;https://example.com/material.docx?signature=test&amp;quot;}'
         )
         candidates = _extract_document_candidates(
             html,
@@ -1331,6 +1347,10 @@ class GUIServiceTests(unittest.TestCase):
         self.assertEqual(
             candidates[0].reference,
             "tos-cn-i-test/folder/material.docx",
+        )
+        self.assertEqual(
+            candidates[0].url,
+            "https://example.com/material.docx?signature=test",
         )
 
     def test_doubao_share_decodes_unicode_escaped_document_uri(self):

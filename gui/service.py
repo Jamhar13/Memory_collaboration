@@ -39,7 +39,13 @@ from scripts.project_paths import (
     IMAGES_DIR,
     PROJECT_ROOT,
 )
-from scripts.providers import WAIT_SELECTOR, codex, collect_virtualized_html, parse_messages
+from scripts.providers import (
+    WAIT_SELECTOR,
+    codex,
+    collect_virtualized_html,
+    parse_messages,
+    provider_for_url,
+)
 
 
 SAVE_DEBUG_SNAPSHOT = os.getenv("AI_MEMORY_SAVE_DEBUG_HTML", "").strip() == "1"
@@ -641,16 +647,11 @@ async def launch_browser_context(
     last_error: Optional[BaseException] = None
     for index, channel in enumerate(channels):
         try:
-            context = await playwright.chromium.launch_persistent_context(
-                user_data_dir=str(
-                    _browser_profile_directory(channel, profile_root)
-                ),
-                headless=headless,
-                channel=channel,
-                viewport=viewport,
-                no_viewport=no_viewport,
-                ignore_default_args=["--enable-automation"],
-                args=[
+            launch_options = {
+                "headless": headless,
+                "channel": channel,
+                "ignore_default_args": ["--enable-automation"],
+                "args": [
                     "--disable-blink-features=AutomationControlled",
                     "--no-first-run",
                     "--no-service-autorun",
@@ -659,6 +660,14 @@ async def launch_browser_context(
                         if start_minimized else []
                     ),
                 ],
+            }
+            context = await playwright.chromium.launch_persistent_context(
+                user_data_dir=str(
+                    _browser_profile_directory(channel, profile_root)
+                ),
+                viewport=viewport,
+                no_viewport=no_viewport,
+                **launch_options,
             )
             if logger:
                 logger(f"正在使用 {BROWSER_CHANNEL_LABELS[channel]}。")
@@ -1780,9 +1789,17 @@ def _extract_doubao_embedded_document_candidates(
             if key in seen or not _is_safe_doubao_file_uri(uri):
                 continue
             seen.add(key)
+            block = decoded[match.start():match.start() + 2500]
+            url_match = re.search(
+                r'"url"\s*:\s*"(?P<url>https?://[^"\r\n]+)"',
+                block,
+                re.IGNORECASE,
+            )
+            signed_url = url_match.group("url") if url_match else ""
             candidates.append(DocumentCandidate(
                 uri,
-                f"{origin}{DOUBAO_DOCUMENT_API_PATH}",
+                signed_url if _is_safe_document_url(signed_url)
+                else f"{origin}{DOUBAO_DOCUMENT_API_PATH}",
                 filename,
             ))
     return candidates
@@ -3276,10 +3293,13 @@ async def _close_browser_context_safely(
 
 
 def _parse_page_messages(url: str, soup: BeautifulSoup, asset_map: Mapping[str, str]):
-    """按请求路径解析页面；Codex 链接绝不降级成验证页文本。"""
+    """已知平台链接绝不降级成页面壳文本。"""
     provider, messages = parse_messages(soup, asset_map)
-    if codex.is_codex_path(urlparse(url).path):
+    parsed_url = urlparse(url)
+    if codex.is_codex_path(parsed_url.path):
         return (provider, messages) if provider is codex else (None, None)
+    if (parsed_url.hostname or "").lower() in DOUBAO_HOSTS:
+        return (provider, messages) if provider is not None else (None, None)
     return (provider, messages) if provider is not None else (
         None,
         parse_fallback_messages_gui(soup),
@@ -3337,6 +3357,9 @@ async def fetch_chat_pipeline(
     # 真实消息节点，失败后复用现有的有头浏览器回退链。
     requires_content_probe = requires_login_probe or codex_request
     requested_host = urlparse(url).netloc.lower().split(":", 1)[0]
+    doubao_public_thread = (
+        requested_host in DOUBAO_HOSTS and requested_path.startswith("/thread/")
+    )
     allow_interactive_login = need_login
     chatgpt_no_login = (
         not need_login
@@ -3367,9 +3390,21 @@ async def fetch_chat_pipeline(
                 no_viewport=need_login,
                 start_minimized=False,
                 logger=logger,
-                profile_root=browser_profile_root,
+                profile_root=(
+                    Path(browser_profile_root or BROWSER_USER_DATA_DIR)
+                    / "public"
+                    if doubao_public_thread else browser_profile_root
+                ),
             )
             page = context.pages[0] if context.pages else await context.new_page()
+            if doubao_public_thread:
+                session = await context.new_cdp_session(page)
+                await session.send("Storage.clearDataForOrigin", {
+                    "origin": "https://www.doubao.com",
+                    "storageTypes": "all",
+                })
+                await session.detach()
+                await context.clear_cookies()
             if need_login:
                 await _set_browser_window_state(page, "maximized")
             response_document_candidates: list[DocumentCandidate] = []
@@ -3384,9 +3419,31 @@ async def fetch_chat_pipeline(
             chatgpt_assets_rehydrated = False
             pre_rehydrate_chat_html: Optional[str] = None
 
+            async def capture_doubao_share_document(response: Any) -> None:
+                try:
+                    body = await response.text()
+                except Exception:
+                    return
+                response_document_candidates.extend(
+                    _extract_doubao_embedded_document_candidates(
+                        body,
+                        "https://www.doubao.com",
+                    )
+                )
+
             def capture_response_assets(response: Any) -> None:
                 task = None
-                if codex_request and _is_codex_share_data_response(response.url):
+                response_url = urlparse(response.url)
+                if (
+                    doubao_public_thread
+                    and response.status == 200
+                    and response_url.hostname in DOUBAO_HOSTS
+                    and response_url.path == requested_path
+                ):
+                    task = asyncio.create_task(
+                        capture_doubao_share_document(response)
+                    )
+                elif codex_request and _is_codex_share_data_response(response.url):
                     if response.status == 200:
                         authorized_content_responses.add(response.url)
                     task = asyncio.create_task(_capture_codex_share_data(
@@ -3609,16 +3666,32 @@ async def fetch_chat_pipeline(
                     await page.wait_for_timeout(2500)
                     await _drain_response_tasks(response_tasks)
 
+                page_provider = provider_for_url(page.url)
+                wait_selector = (
+                    page_provider.WAIT_SELECTOR if page_provider else WAIT_SELECTOR
+                )
                 if logger:
-                    logger("正在等待动态内容渲染...")
+                    logger(
+                        f"正在等待 {page_provider.DISPLAY_NAME} 对话内容渲染..."
+                        if page_provider else "正在等待动态内容渲染..."
+                    )
                 try:
                     await page.wait_for_selector(
-                        WAIT_SELECTOR,
+                        wait_selector,
                         state="attached",
-                        timeout=15000
+                        timeout=30000 if page_provider else 15000,
                     )
                 except Exception:
-                    if logger:
+                    if doubao_public_thread:
+                        if logger:
+                            logger("豆包公有页首次渲染失败，正在重新加载...")
+                        await goto_with_retry_gui(page, url, logger=logger)
+                        await page.wait_for_selector(
+                            wait_selector,
+                            state="attached",
+                            timeout=30000,
+                        )
+                    elif logger:
                         logger("等待动态节点超时，可能网页结构有所变化或需登录访问。")
                 await page.wait_for_timeout(2000)
 
