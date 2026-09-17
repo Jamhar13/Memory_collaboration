@@ -1319,7 +1319,7 @@ class GeminiSummarizerTests(unittest.TestCase):
             def __init__(self, page):
                 self.page = page
 
-            async def scroll_into_view_if_needed(self, timeout):
+            async def evaluate(self, script):
                 self.page.round += 1
 
         class VisibleMessage:
@@ -1412,6 +1412,9 @@ class GeminiSummarizerTests(unittest.TestCase):
                 self.has_preview = has_preview
 
             async def scroll_into_view_if_needed(self, timeout):
+                pass
+
+            async def evaluate(self, script):
                 pass
 
             def locator(self, selector):

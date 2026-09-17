@@ -76,9 +76,6 @@ async def collect_html(page):
     unchanged_rounds = 0
     first_fragment = None
     for _ in range(20):
-        await _scroll_messages(
-            page, direct_messages, await direct_messages.count()
-        )
         current_fragments = await direct_messages.evaluate_all(
             """elements => elements.map((wrapper, index) => {
                 const roleRows = Array.from(wrapper.querySelectorAll(
@@ -104,7 +101,10 @@ async def collect_html(page):
         )
         for item in current_fragments:
             try:
-                previews = direct_messages.nth(item["index"]).locator(
+                message = direct_messages.nth(item["index"])
+                await message.scroll_into_view_if_needed(timeout=3000)
+                await page.wait_for_timeout(120)
+                previews = message.locator(
                     'iframe[src*="html_preview"]'
                 )
                 preview_images = []
@@ -135,7 +135,16 @@ async def collect_html(page):
             break
         first_fragment = current_first
         try:
-            await direct_messages.first.scroll_into_view_if_needed(timeout=3000)
+            await direct_messages.first.evaluate(
+                """element => {
+                    let scroller = element.parentElement;
+                    while (
+                        scroller
+                        && scroller.scrollHeight <= scroller.clientHeight
+                    ) scroller = scroller.parentElement;
+                    if (scroller) scroller.scrollTop = 0;
+                }"""
+            )
         except Exception:
             break
         await page.wait_for_timeout(700)
