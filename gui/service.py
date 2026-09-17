@@ -512,11 +512,7 @@ async def _page_has_conversation_content(page: Any, page_url: str) -> bool:
     elif host == "chat.deepseek.com":
         selector = "[data-virtual-list-item-key] .ds-message"
     elif host in {"doubao.com", "www.doubao.com"}:
-        selector = (
-            ".message-item, "
-            "div[class*='message-list-'] div.my-0.w-full.mx-auto "
-            "div.flex.flex-row.w-full"
-        )
+        selector = "div[class*='message-list-'] [data-message-id]"
     elif host in GEMINI_HOSTS:
         selector = "user-query, message-content, model-response"
     elif host in KIMI_HOSTS:
@@ -559,6 +555,13 @@ async def _page_has_conversation_content(page: Any, page_url: str) -> bool:
         await page.wait_for_selector(
             selector, state="attached", timeout=timeout_ms
         )
+        current = urlparse(getattr(page, "url", page_url))
+        current_host = current.netloc.lower().split(":", 1)[0]
+        for hosts, pattern in private_checks:
+            if host in hosts and pattern.match(requested.path):
+                if current_host not in hosts or not pattern.match(current.path):
+                    return False
+                break
         return await page.locator(selector).count() > 0
     except Exception:
         return False
@@ -3486,7 +3489,7 @@ async def fetch_chat_pipeline(
                     await _drain_response_tasks(response_tasks)
                     content_ready = (
                         await _page_has_conversation_content(page, url)
-                        or bool(authorized_content_responses)
+                        or (codex_request and bool(authorized_content_responses))
                     )
                     if content_ready:
                         if need_login and requested_host in {
@@ -3560,7 +3563,7 @@ async def fetch_chat_pipeline(
                             await _drain_response_tasks(response_tasks)
                             content_ready = (
                                 await _page_has_conversation_content(page, url)
-                                or bool(authorized_content_responses)
+                                or (codex_request and bool(authorized_content_responses))
                             )
                             if content_ready:
                                 if logger:
@@ -4164,6 +4167,9 @@ async def fetch_chat_pipeline(
                 elif codex_request:
                     if logger:
                         logger("Codex 页面未出现真实消息节点，拒绝解析验证页。")
+                elif requested_host in DOUBAO_HOSTS:
+                    if logger:
+                        logger("豆包页面未出现真实消息节点，拒绝解析页面壳。")
                 else:
                     if logger:
                         logger("未识别出平台标志性类名，使用降级解析。")

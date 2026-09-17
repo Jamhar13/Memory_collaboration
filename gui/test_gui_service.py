@@ -36,6 +36,7 @@ from gui.service import (
     _inject_chatgpt_shared_images,
     _chatgpt_message_asset_groups,
     _normalize_doubao_ai_document_text,
+    _page_has_conversation_content,
     _parse_page_messages,
     _rehydrate_chatgpt_conversation,
     _repair_downloaded_text_mojibake,
@@ -660,6 +661,30 @@ class GUIServiceTests(unittest.TestCase):
         )
         self.assertIsNone(provider)
         self.assertIsNone(messages)
+
+    def test_doubao_home_message_item_is_not_conversation_content(self):
+        class Locator:
+            async def count(self):
+                return 0
+
+        class Page:
+            url = "https://www.doubao.com/"
+            selector = ""
+
+            async def wait_for_selector(self, selector, state, timeout):
+                self.selector = selector
+
+            def locator(self, selector):
+                self.selector = selector
+                return Locator()
+
+        page = Page()
+        ready = asyncio.run(_page_has_conversation_content(
+            page,
+            "https://www.doubao.com/chat/38441607137483266",
+        ))
+        self.assertFalse(ready)
+        self.assertNotIn(".message-item", page.selector)
 
     def test_generate_raw_markdown(self):
         with tempfile.TemporaryDirectory() as temp_dir:
