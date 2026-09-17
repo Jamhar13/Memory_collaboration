@@ -1439,6 +1439,15 @@ async def _download_image_candidates(
     async def download(
         src: str,
     ) -> tuple[str, Optional[bytes], Optional[str]]:
+        if src.startswith("data:image/") and "," in src:
+            import base64
+            try:
+                body = base64.b64decode(src.split(",", 1)[1])
+                if _is_supported_image_body(body):
+                    return src, body, None
+                return src, None, "not_an_image"
+            except (ValueError, TypeError):
+                return src, None, "invalid_data_url"
         failure_reason: Optional[str] = None
         for _attempt in range(GUI_IMAGE_DOWNLOAD_ATTEMPTS):
             try:
@@ -1518,31 +1527,31 @@ async def _download_image_candidates(
                         )
             except Exception as error:
                 failure_reason = type(error).__name__
-                try:
-                    data_url = await page.evaluate(
-                        """async (url) => {
-                            const response = await fetch(url, {credentials: 'include'});
-                            if (!response.ok) return null;
-                            const bytes = new Uint8Array(await response.arrayBuffer());
-                            let binary = '';
-                            for (let i = 0; i < bytes.length; i += 0x8000) {
-                                binary += String.fromCharCode.apply(
-                                    null, bytes.subarray(i, i + 0x8000)
-                                );
-                            }
-                            return 'data:;base64,' + btoa(binary);
-                        }""",
-                        src,
-                    )
-                    if data_url and "," in data_url:
-                        import base64
-                        body = base64.b64decode(data_url.split(",", 1)[1])
-                        if _is_supported_image_body(body):
-                            return src, body, None
-                        failure_reason = "not_an_image"
-                except Exception as fallback_error:
-                    failure_reason = type(fallback_error).__name__
-                continue
+            try:
+                data_url = await page.evaluate(
+                    """async (url) => {
+                        const response = await fetch(url, {credentials: 'include'});
+                        if (!response.ok) return null;
+                        const bytes = new Uint8Array(await response.arrayBuffer());
+                        let binary = '';
+                        for (let i = 0; i < bytes.length; i += 0x8000) {
+                            binary += String.fromCharCode.apply(
+                                null, bytes.subarray(i, i + 0x8000)
+                            );
+                        }
+                        return 'data:;base64,' + btoa(binary);
+                    }""",
+                    src,
+                )
+                if data_url and "," in data_url:
+                    import base64
+                    body = base64.b64decode(data_url.split(",", 1)[1])
+                    if _is_supported_image_body(body):
+                        return src, body, None
+                    failure_reason = "not_an_image"
+            except Exception as fallback_error:
+                failure_reason = type(fallback_error).__name__
+            continue
         try:
             images = page.locator("img")
             for index in range(await images.count()):
@@ -3741,8 +3750,10 @@ async def fetch_chat_pipeline(
                         alt = str(img.get("alt") or "").strip().lower()
                         if not (
                             src
-                            and src.startswith("http")
-                            and not src.startswith("data:image/svg")
+                            and (
+                                src.startswith("http")
+                                or src.startswith("data:image/png;base64,")
+                            )
                         ):
                             continue
                         if (

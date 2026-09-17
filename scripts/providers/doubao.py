@@ -1,10 +1,12 @@
 """豆包页面消息解析。"""
 
+import base64
 import re
 from collections import Counter
 from urllib.parse import unquote
 
 import markdownify
+from bs4 import BeautifulSoup
 
 
 DISPLAY_NAME = "豆包"
@@ -69,33 +71,80 @@ async def collect_html(page):
     direct_messages = lists.nth(selected["index"]).locator(
         DIRECT_MESSAGE_SELECTOR
     )
-    direct_count = await direct_messages.count()
-    await _scroll_messages(page, direct_messages, direct_count)
+    fragment_by_key = {}
+    ordered_keys = []
+    unchanged_rounds = 0
+    first_fragment = None
+    for _ in range(20):
+        await _scroll_messages(
+            page, direct_messages, await direct_messages.count()
+        )
+        current_fragments = await direct_messages.evaluate_all(
+            """elements => elements.map((wrapper, index) => {
+                const roleRows = Array.from(wrapper.querySelectorAll(
+                    'div.flex.flex-row.w-full'
+                ));
+                if (!roleRows.length) return null;
+                const isUser = roleRows.some(row => row.classList.contains('justify-end'));
+                const hasContent = Boolean(
+                    (wrapper.innerText || '').trim()
+                    || wrapper.querySelector('img, picture, iframe, [class*="file"], [class*="doc"]')
+                );
+                if (!hasContent) return null;
+                const clone = wrapper.cloneNode(true);
+                clone.classList.add('message-item');
+                clone.setAttribute('data-doubao-role', isUser ? 'user' : 'assistant');
+                const message = wrapper.querySelector('[data-message-id]');
+                return {
+                    index,
+                    key: message?.getAttribute('data-message-id') || clone.outerHTML,
+                    html: clone.outerHTML
+                };
+            }).filter(Boolean)"""
+        )
+        for item in current_fragments:
+            try:
+                previews = direct_messages.nth(item["index"]).locator(
+                    'iframe[src*="html_preview"]'
+                )
+                preview_images = []
+                for preview_index in range(await previews.count()):
+                    image = await previews.nth(preview_index).screenshot(type="png")
+                    preview_images.append(
+                        "data:image/png;base64," + base64.b64encode(image).decode("ascii")
+                    )
+                if preview_images:
+                    fragment = BeautifulSoup(item["html"], "html.parser")
+                    for iframe, image_src in zip(fragment.find_all("iframe"), preview_images):
+                        iframe.replace_with(fragment.new_tag("img", src=image_src, alt="生成图表"))
+                    item["html"] = str(fragment)
+            except Exception:
+                continue
+        current_keys = [item["key"] for item in current_fragments]
+        new_keys = [key for key in current_keys if key not in fragment_by_key]
+        if new_keys:
+            ordered_keys = new_keys + ordered_keys
+        for item in current_fragments:
+            fragment_by_key[item["key"]] = item["html"]
 
-    message_fragments = await direct_messages.evaluate_all(
-        """elements => elements.map((wrapper, index) => {
-            const roleRows = Array.from(wrapper.querySelectorAll(
-                'div.flex.flex-row.w-full'
-            ));
-            if (!roleRows.length) return null;
-            const isUser = roleRows.some(row => row.classList.contains('justify-end'));
-            const hasContent = Boolean(
-                (wrapper.innerText || '').trim()
-                || wrapper.querySelector('img, picture, [class*="file"], [class*="doc"]')
-            );
-            if (!hasContent) return null;
-            const clone = wrapper.cloneNode(true);
-            clone.classList.add('message-item');
-            clone.setAttribute('data-doubao-role', isUser ? 'user' : 'assistant');
-            clone.setAttribute('data-doubao-order', String(index));
-            return clone.outerHTML;
-        }).filter(Boolean)"""
-    )
-    if not message_fragments:
+        current_first = current_keys[0] if current_keys else None
+        unchanged_rounds = (
+            unchanged_rounds + 1 if current_first == first_fragment else 0
+        )
+        if unchanged_rounds >= 2 or not current_fragments:
+            break
+        first_fragment = current_first
+        try:
+            await direct_messages.first.scroll_into_view_if_needed(timeout=3000)
+        except Exception:
+            break
+        await page.wait_for_timeout(700)
+
+    if not ordered_keys:
         return None
     return (
         "<!DOCTYPE html><html><body>"
-        + "\n".join(message_fragments)
+        + "\n".join(fragment_by_key[key] for key in ordered_keys)
         + "</body></html>"
     )
 

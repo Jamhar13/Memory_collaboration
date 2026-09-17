@@ -1301,6 +1301,169 @@ class GeminiSummarizerTests(unittest.TestCase):
         self.assertEqual(unrelated_page.scrolled, [])
         self.assertEqual(unrelated_page.waits, [])
 
+    def test_direct_doubao_collector_merges_history_loaded_while_scrolling(self):
+        def fragment(number):
+            return {
+                "key": str(number),
+                "html": (
+                    '<div class="message-item" data-doubao-role="assistant">'
+                    f'消息{number}</div>'
+                ),
+            }
+
+        class EmptyShareMessages:
+            async def count(self):
+                return 0
+
+        class FirstMessage:
+            def __init__(self, page):
+                self.page = page
+
+            async def scroll_into_view_if_needed(self, timeout):
+                self.page.round += 1
+
+        class VisibleMessage:
+            async def scroll_into_view_if_needed(self, timeout):
+                pass
+
+        class DirectMessages:
+            def __init__(self, page):
+                self.page = page
+                self.first = FirstMessage(page)
+
+            async def count(self):
+                return len(self.page.snapshots[min(
+                    self.page.round, len(self.page.snapshots) - 1
+                )])
+
+            def nth(self, index):
+                return VisibleMessage()
+
+            async def evaluate_all(self, script):
+                return self.page.snapshots[min(
+                    self.page.round, len(self.page.snapshots) - 1
+                )]
+
+        class SelectedList:
+            def __init__(self, page):
+                self.page = page
+
+            def locator(self, selector):
+                self.page.direct_selector = selector
+                return DirectMessages(self.page)
+
+        class Lists:
+            def __init__(self, page):
+                self.page = page
+
+            async def evaluate_all(self, script):
+                return [{"index": 0, "count": 2, "textLength": 10}]
+
+            def nth(self, index):
+                return SelectedList(self.page)
+
+        class FakePage:
+            def __init__(self):
+                self.round = 0
+                self.waits = []
+                self.direct_selector = None
+                self.snapshots = [
+                    [fragment(3), fragment(4)],
+                    [fragment(1), fragment(2), fragment(3), fragment(4)],
+                    [fragment(1), fragment(2), fragment(3), fragment(4)],
+                    [fragment(1), fragment(2), fragment(3), fragment(4)],
+                ]
+
+            def locator(self, selector):
+                if selector == doubao.SHARE_MESSAGE_SELECTOR:
+                    return EmptyShareMessages()
+                return Lists(self)
+
+            async def wait_for_timeout(self, milliseconds):
+                self.waits.append(milliseconds)
+
+        page = FakePage()
+        html = asyncio.run(doubao.collect_html(page))
+
+        self.assertEqual(page.direct_selector, doubao.DIRECT_MESSAGE_SELECTOR)
+        self.assertEqual(page.round, 3)
+        self.assertEqual(html.count('class="message-item"'), 4)
+        self.assertLess(html.index("消息1"), html.index("消息4"))
+
+    def test_direct_doubao_collector_captures_generated_iframe_charts(self):
+        png = b"\x89PNG\r\n\x1a\nchart"
+
+        class Preview:
+            async def screenshot(self, type):
+                return png
+
+        class Previews:
+            def __init__(self, count):
+                self._count = count
+
+            async def count(self):
+                return self._count
+
+            def nth(self, index):
+                return Preview()
+
+        class Message:
+            def __init__(self, has_preview=False):
+                self.has_preview = has_preview
+
+            async def scroll_into_view_if_needed(self, timeout):
+                pass
+
+            def locator(self, selector):
+                return Previews(int(self.has_preview))
+
+        class Messages:
+            first = Message()
+
+            async def count(self):
+                return 2
+
+            def nth(self, index):
+                return Message(has_preview=index == 1)
+
+            async def evaluate_all(self, script):
+                return [{
+                    "index": 1,
+                    "key": "1",
+                    "html": (
+                        '<div class="message-item" data-doubao-role="assistant">'
+                        '<iframe src="https://marscode-static.doubaocdn.com/'
+                        'html_preview/?channelId=chart"></iframe></div>'
+                    ),
+                }]
+
+        class SelectedList:
+            def locator(self, selector):
+                return Messages()
+
+        class Lists:
+            async def evaluate_all(self, script):
+                return [{"index": 0, "count": 1, "textLength": 0}]
+
+            def nth(self, index):
+                return SelectedList()
+
+        class EmptyShareMessages:
+            async def count(self):
+                return 0
+
+        class Page:
+            def locator(self, selector):
+                return EmptyShareMessages() if selector == doubao.SHARE_MESSAGE_SELECTOR else Lists()
+
+            async def wait_for_timeout(self, milliseconds):
+                pass
+
+        html = asyncio.run(doubao.collect_html(Page()))
+        self.assertIn("data:image/png;base64,", html)
+        self.assertIn("生成图表", html)
+        self.assertNotIn("<iframe", html)
+
     def test_direct_doubao_synthetic_roles_do_not_depend_on_css_role_class(self):
         html = """
         <div class="message-item" data-doubao-role="user">用户问题</div>

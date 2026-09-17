@@ -263,6 +263,52 @@ class GUIServiceTests(unittest.TestCase):
         self.assertTrue(image_map[candidates[2]].startswith("./assets/img_2_"))
         self.assertTrue(image_map[candidates[3]].startswith("./assets/img_3_"))
 
+    def test_image_download_saves_embedded_png_data_url(self):
+        source = "data:image/png;base64,iVBORw0KGgpyZWFs"
+        with tempfile.TemporaryDirectory() as temp_dir:
+            image_map = asyncio.run(_download_image_candidates(
+                SimpleNamespace(),
+                [source],
+                Path(temp_dir),
+                "./assets",
+            ))
+            saved = Path(temp_dir) / Path(image_map[source]).name
+            self.assertTrue(saved.read_bytes().startswith(b"\x89PNG\r\n\x1a\n"))
+
+    def test_image_download_falls_back_to_page_fetch_after_http_failure(self):
+        class FakeResponse:
+            ok = False
+            status = 403
+            headers = {}
+
+        class FakeRequest:
+            async def get(self, src, timeout):
+                return FakeResponse()
+
+        class FakePage:
+            request = FakeRequest()
+
+            def __init__(self):
+                self.fetches = []
+
+            async def evaluate(self, script, src):
+                self.fetches.append(src)
+                return "data:;base64,iVBORw0KGgpyZWFs"
+
+        source = "https://example.com/protected.png"
+        page = FakePage()
+        with tempfile.TemporaryDirectory() as temp_dir:
+            image_map = asyncio.run(_download_image_candidates(
+                page,
+                [source],
+                Path(temp_dir),
+                "./assets",
+            ))
+            saved = Path(temp_dir) / Path(image_map[source]).name
+            self.assertTrue(saved.read_bytes().startswith(b"\x89PNG\r\n\x1a\n"))
+
+        self.assertEqual(page.fetches, [source])
+
     def test_existing_image_directory_stays_concurrent_and_deduplicated(self):
         class FakeResponse:
             def __init__(self, ok, payload):
