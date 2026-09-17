@@ -6,7 +6,11 @@ class：.segment-user/.segment-assistant、.markdown-container、
 逻辑，并验证注册表 host 路由与 GUI 登录判定。
 """
 
+import asyncio
+import tempfile
 import unittest
+from pathlib import Path
+from types import SimpleNamespace
 
 from bs4 import BeautifulSoup
 
@@ -17,7 +21,10 @@ from scripts.providers import (
     provider_for_host,
 )
 from gui.service import (
+    _collect_response_assets,
+    _download_image_candidates,
     _extract_kimi_document_card_candidates,
+    _kimi_private_conversation_url,
     requires_authenticated_browser,
 )
 
@@ -307,6 +314,71 @@ class KimiParseMessagesTests(unittest.TestCase):
 
 
 class KimiRegistryTests(unittest.TestCase):
+    def test_share_metadata_restores_private_chat_and_output_assets(self):
+        html = '<script>{"share":{"chat":{"id":"chat-id-12345678"}}}</script>'
+        self.assertEqual(
+            _kimi_private_conversation_url(html),
+            "https://www.kimi.com/chat/chat-id-12345678",
+        )
+        self.assertEqual(
+            _kimi_private_conversation_url(
+                '<a href="/chat/private-id-12345678?chat_enter_method=history">'
+            ),
+            "https://www.kimi.com/chat/private-id-12345678",
+        )
+        documents, images = [], set()
+        _collect_response_assets(
+            {"root": {"children": [
+                {"name": "result.xlsx", "url": "https://www.kimi.com/file.xlsx"},
+                {"name": "chart.png", "url": "https://www.kimi.com/chart.png"},
+            ]}},
+            "https://www.kimi.com/share/example",
+            documents,
+            images,
+        )
+        self.assertEqual([item.filename for item in documents], ["result.xlsx"])
+        self.assertEqual(images, {"https://www.kimi.com/chart.png"})
+
+    def test_signed_image_filename_maps_to_local_asset(self):
+        source = (
+            "https://www.kimi.com/apiv2-files/sign-obj/example"
+            "?filename=chart.png&sig=example"
+        )
+
+        class Response:
+            ok = True
+            headers = {"content-type": "image/png"}
+
+            async def body(self):
+                return b"\x89PNG\r\n\x1a\nimage"
+
+        class Request:
+            async def get(self, url, timeout):
+                return Response()
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            image_map = asyncio.run(_download_image_candidates(
+                SimpleNamespace(request=Request(), url="https://www.kimi.com/chat/id"),
+                [source],
+                Path(temp_dir),
+                "./images",
+            ))
+
+        self.assertEqual(image_map["chart.png"], image_map[source])
+
+    def test_generated_preview_cards_use_local_assets(self):
+        html = assistant_segment('''
+          <div class="preview-card"><div class="title">chart.png</div></div>
+          <div class="preview-card"><div class="title">result.xlsx</div></div>
+          <div class="markdown-container"><div class="markdown">完成</div></div>
+        ''')
+        messages = kimi.parse_messages(soup(html), {
+            "chart.png": "./images/chart.png",
+            "result.xlsx": "./files/result.xlsx",
+        })
+        self.assertIn("![chart.png](./images/chart.png)", messages[0]["content"])
+        self.assertIn("[result.xlsx](./files/result.xlsx)", messages[0]["content"])
+
     def test_private_file_cards_become_download_candidates(self):
         candidates = _extract_kimi_document_card_candidates(
             KIMI_ATTACHMENT_HTML,

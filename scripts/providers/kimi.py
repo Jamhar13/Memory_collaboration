@@ -309,8 +309,17 @@ def _clean_markdown(text) -> str:
 
 
 def _render_assistant(segment, image_map) -> str:
-    containers = _answer_containers(segment)
     parts = []
+    for card in segment.select(".preview-card"):
+        title = card.select_one(".title")
+        filename = title.get_text(strip=True) if title else ""
+        local = image_map.get(filename.lower(), "")
+        if local:
+            if re.search(r"\.(?:png|jpe?g|webp|gif|bmp)$", filename, re.IGNORECASE):
+                parts.append(f"![{filename}]({local})")
+            else:
+                parts.append(f"📎 [{filename}]({local})")
+    containers = _answer_containers(segment)
     for container in list(containers):
         _normalize_code_cards(container)
         _convert_tables(container)

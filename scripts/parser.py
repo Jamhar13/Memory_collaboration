@@ -8,7 +8,6 @@ from bs4 import BeautifulSoup
 from playwright.async_api import async_playwright
 from rich.console import Console
 from rich.panel import Panel
-from urllib.parse import urlparse
 
 from .markdown_exporter import display_and_export
 from .project_paths import (
@@ -22,7 +21,7 @@ from .providers import (
     WAIT_SELECTOR,
     collect_virtualized_html,
     parse_messages,
-    provider_for_host,
+    provider_for_url,
 )
 
 
@@ -99,8 +98,7 @@ async def _wait_for_conversation_content(page):
     ``WAIT_SELECTOR`` 出现——比全平台联合选择器更准确，且日志能说明在等
     哪个平台；域名无法识别时回退到联合选择器。等待成功/超时都有明确日志。
     """
-    host = urlparse(page.url).netloc.lower().split(":", 1)[0]
-    provider = provider_for_host(host)
+    provider = provider_for_url(page.url)
 
     if provider is not None:
         console.print(

@@ -2323,7 +2323,7 @@ class AIMemoryGUI:
         def ask():
             result["confirmed"] = messagebox.askyesno(
                 "需要登录",
-                "ChatGPT 不允许匿名下载此图片。是否打开浏览器登录后重试？",
+                "该资源需要登录后才能下载。是否打开浏览器登录后重试？",
                 parent=self.root,
             )
             answered.set()

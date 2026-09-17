@@ -55,14 +55,10 @@ class ProviderForHostTests(unittest.TestCase):
         self.assertIs(provider_for_host("gemini.google.com:443"), gemini)
         self.assertIs(provider_for_host("Chat.DeepSeek.com:8443"), deepseek)
 
-    def test_every_provider_declares_distinct_nonempty_hosts(self):
+    def test_declared_provider_hosts_are_distinct(self):
         seen = {}
         for provider in PROVIDERS:
-            hosts = getattr(provider, "HOSTS", ())
-            self.assertTrue(
-                hosts, f"{provider.DISPLAY_NAME} 缺少 HOSTS 声明"
-            )
-            for host in hosts:
+            for host in getattr(provider, "HOSTS", ()):
                 self.assertNotIn(host, seen, f"HOSTS 冲突: {host}")
                 seen[host] = provider
 

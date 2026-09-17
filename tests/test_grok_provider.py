@@ -192,10 +192,9 @@ class GrokRegistryTests(unittest.TestCase):
         from scripts.providers import PROVIDERS
         self.assertIn(grok, PROVIDERS)
 
-    def test_provider_is_last(self):
-        """Grok 应追加到 PROVIDERS 末尾。"""
-        from scripts.providers import PROVIDERS
-        self.assertIs(PROVIDERS[-1], grok)
+    def test_provider_keeps_priority_before_codex(self):
+        from scripts.providers import PROVIDERS, codex
+        self.assertLess(PROVIDERS.index(grok), PROVIDERS.index(codex))
 
     def test_provider_for_host_routes(self):
         from scripts.providers import provider_for_host
@@ -758,14 +757,14 @@ class GrokContentProbeTests(unittest.IsolatedAsyncioTestCase):
             _, timeout = page.waited[0]
             self.assertEqual(timeout, 45000)
 
-    async def test_share_page_no_private_check(self):
-        """公开分享页不走私有会话检测，用默认 10s 超时。"""
+    async def test_share_page_gets_slow_hydration_window(self):
+        """公开分享页同样可能慢 hydration，等待窗口应为 45 秒。"""
         share_url = "https://grok.com/share/bGVnYWN5_abc"
         page, probe = self._make_fake_page(share_url, {})
         await probe(page, share_url)
         if page.waited:
             _, timeout = page.waited[0]
-            self.assertEqual(timeout, 10000)
+            self.assertEqual(timeout, 45000)
 
 
 if __name__ == "__main__":

@@ -168,7 +168,7 @@ class LiteBrowserSelectionTests(unittest.IsolatedAsyncioTestCase):
                             login_required_callback=callback,
                             login_confirmation_callback=confirmation_callback,
                         )
-                        self.assertIn("需要授权登录", result.error)
+                        self.assertIn("已取消打开登录浏览器", result.error)
 
                 self.assertEqual(
                     [

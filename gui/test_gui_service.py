@@ -25,6 +25,10 @@ from gui.service import (
     _extract_chatgpt_shared_image_sources,
     _extract_deepseek_document_card_candidates,
     _extract_document_candidates,
+    _extract_gemini_document_card_candidates,
+    _extract_grok_document_card_candidates,
+    _grok_document_card_download,
+    _gemini_private_conversation_url,
     _extract_doubao_ai_document_resources,
     _extract_doubao_ai_document_titles,
     _inject_chatgpt_attachment_names,
@@ -34,6 +38,7 @@ from gui.service import (
     _normalize_doubao_ai_document_text,
     _rehydrate_chatgpt_conversation,
     _repair_downloaded_text_mojibake,
+    _set_browser_window_state,
     DocumentCandidate,
     build_document_asset_directory,
     build_image_asset_directory,
@@ -44,6 +49,7 @@ from gui.service import (
     generate_output_bundle,
     generate_raw_markdown,
     gui_summary_config_candidates,
+    launch_browser_context,
     normalize_markdown_filename,
     parse_fallback_messages_gui,
     requires_authenticated_browser,
@@ -52,6 +58,143 @@ from scripts.gemini_summarizer import GeminiSummaryError, SummaryConfig
 
 
 class GUIServiceTests(unittest.TestCase):
+    def test_background_browser_starts_offscreen(self):
+        launcher = AsyncMock(return_value=(object(), "chromium"))
+        playwright = SimpleNamespace(
+            chromium=SimpleNamespace(launch_persistent_context=launcher)
+        )
+        with patch("gui.service.browser_channel_candidates", return_value=("chromium",)):
+            asyncio.run(launch_browser_context(
+                playwright,
+                headless=False,
+                viewport=None,
+                no_viewport=True,
+                start_minimized=True,
+            ))
+        args = launcher.await_args.kwargs["args"]
+        self.assertIn("--start-minimized", args)
+        self.assertIn("--window-position=-32000,-32000", args)
+
+    def test_maximize_restores_offscreen_browser_first(self):
+        session = SimpleNamespace(
+            send=AsyncMock(side_effect=[{"windowId": 7}, None, None]),
+            detach=AsyncMock(),
+        )
+        page = SimpleNamespace(
+            context=SimpleNamespace(new_cdp_session=AsyncMock(return_value=session))
+        )
+        asyncio.run(_set_browser_window_state(page, "maximized"))
+        self.assertEqual(
+            session.send.await_args_list[1].args,
+            ("Browser.setWindowBounds", {
+                "windowId": 7,
+                "bounds": {
+                    "windowState": "normal",
+                    "left": 0,
+                    "top": 0,
+                    "width": 1200,
+                    "height": 800,
+                },
+            }),
+        )
+        self.assertEqual(
+            session.send.await_args_list[2].args,
+            ("Browser.setWindowBounds", {
+                "windowId": 7,
+                "bounds": {"windowState": "maximized"},
+            }),
+        )
+
+    def test_grok_share_document_cards(self):
+        html = '''
+        <button aria-label="打开附件">report.pdf</button>
+        <button aria-label="打开附件"><img src="preview-image">image.png</button>
+        <button aria-label="打开附件">result.xlsx</button>
+        '''
+        candidates = _extract_grok_document_card_candidates(
+            html, "https://grok.com/share/example"
+        )
+        self.assertEqual(
+            [candidate.filename for candidate in candidates],
+            ["report.pdf", "result.xlsx"],
+        )
+
+    def test_grok_card_accepts_browser_download(self):
+        class FakeDownload:
+            async def path(self):
+                return downloaded_path
+
+        class FakeCard:
+            async def click(self, timeout):
+                page.listeners["download"](FakeDownload())
+
+        class FakeLocator:
+            def filter(self, **_kwargs):
+                return self
+
+            @property
+            def first(self):
+                return FakeCard()
+
+        class FakeKeyboard:
+            press = AsyncMock()
+
+        class FakePage:
+            def __init__(self):
+                self.listeners = {}
+                self.keyboard = FakeKeyboard()
+
+            def locator(self, _selector):
+                return FakeLocator()
+
+            def on(self, event, callback):
+                self.listeners[event] = callback
+
+            def remove_listener(self, event, _callback):
+                self.listeners.pop(event)
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            downloaded_path = Path(temp_dir) / "result.xlsx"
+            downloaded_path.write_bytes(b"xlsx")
+            page = FakePage()
+            body, headers = asyncio.run(_grok_document_card_download(
+                page,
+                DocumentCandidate(
+                    "grok-card:result.xlsx",
+                    "https://grok.com/share/example",
+                    "result.xlsx",
+                ),
+                1000,
+            ))
+        self.assertEqual(body, b"xlsx")
+        self.assertIn("result.xlsx", headers["content-disposition"])
+        page.keyboard.press.assert_awaited_once_with("Escape")
+
+    def test_gemini_share_metadata_and_document_cards(self):
+        metadata = "[[\"r_file12345678\",\"c_058650b27dade1e6\"]]"
+        import base64
+        encoded = base64.b64encode(metadata.encode()).decode()
+        html = f'''
+        <user-query-file-preview><button aria-label="无法查看或下载共享对话中的文件"
+          jslog="191296;BardVeMetadataKey:{encoded}">
+          <div class="filename-label">报告</div><div class="extension-label">PDF</div>
+        </button></user-query-file-preview>
+        <user-query-file-preview><button aria-label="无法查看或下载共享对话中的文件">
+          <img alt="text/markdown"><div class="filename-label">notes</div>
+        </button></user-query-file-preview>
+        '''
+        self.assertEqual(
+            _gemini_private_conversation_url(html),
+            "https://gemini.google.com/app/058650b27dade1e6",
+        )
+        candidates = _extract_gemini_document_card_candidates(
+            html, "https://gemini.google.com/share/example"
+        )
+        self.assertEqual(
+            [candidate.filename for candidate in candidates],
+            ["报告.pdf", "notes.md"],
+        )
+
     def test_image_downloads_are_bounded_and_keep_success_order(self):
         class FakeResponse:
             def __init__(self, ok, payload):
@@ -378,7 +521,7 @@ class GUIServiceTests(unittest.TestCase):
         self.assertEqual(asset_dir, base / "课程 总结_images")
         self.assertEqual(
             build_markdown_asset_prefix(asset_dir, base),
-            "./%E8%AF%BE%E7%A8%8B%20%E6%80%BB%E7%BB%93_images",
+            "./课程 总结_images",
         )
 
     def test_custom_runtime_directory_owns_summary_cache(self):
@@ -810,7 +953,7 @@ class GUIServiceTests(unittest.TestCase):
             saved = list(output_dir.iterdir())
             self.assertEqual([path.name for path in saved], ["报告.docx"])
             self.assertEqual(saved[0].read_bytes(), b"PK\x03\x04fake-docx")
-            self.assertEqual(mapping["报告.docx"], "./result_files/%E6%8A%A5%E5%91%8A.docx")
+            self.assertEqual(mapping["报告.docx"], "./result_files/报告.docx")
             self.assertNotIn("secret", " ".join(mapping.values()))
 
     def test_chatgpt_document_retries_without_share_scope(self):

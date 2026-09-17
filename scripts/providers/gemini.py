@@ -313,10 +313,21 @@ def _extract_document_attachments(node, asset_map):
                 if url:
                     break
             local = asset_map.get(url, url) if url else asset_map.get(filename.lower(), "")
+            if not local and not ext:
+                stem_matches = {
+                    str(key): value for key, value in asset_map.items()
+                    if re.sub(r"\.[A-Za-z0-9]{1,10}$", "", str(key)).lower()
+                    == name.lower()
+                }
+                if len(set(stem_matches.values())) == 1:
+                    filename, local = next(iter(stem_matches.items()))
             if local:
                 placeholders.append(f"📎 [{filename}]({local})")
             else:
-                placeholders.append(f"📎 **[上传文档]** `{filename}`")
+                placeholders.append(
+                    f"📎 **[上传文档]** `{filename}` "
+                    "（Gemini 分享页未提供下载）"
+                )
         card.decompose()
     return placeholders
 

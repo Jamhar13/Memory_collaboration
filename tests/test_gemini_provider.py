@@ -14,12 +14,36 @@ from scripts.providers import PROVIDERS, WAIT_SELECTOR
 from gui.service import (
     _extract_document_candidates,
     _extract_gemini_document_card_candidates,
+    _page_has_conversation_content,
     requires_authenticated_browser,
 )
 
 
 def soup(html):
     return BeautifulSoup(html, "html.parser")
+
+
+class GeminiContentProbeTests(unittest.IsolatedAsyncioTestCase):
+    async def test_public_share_waits_for_slow_hydration(self):
+        class Locator:
+            async def count(self):
+                return 1
+
+        class Page:
+            url = "https://gemini.google.com/share/example"
+
+            def __init__(self):
+                self.timeout = None
+
+            async def wait_for_selector(self, selector, **kwargs):
+                self.timeout = kwargs["timeout"]
+
+            def locator(self, selector):
+                return Locator()
+
+        page = Page()
+        self.assertTrue(await _page_has_conversation_content(page, page.url))
+        self.assertEqual(page.timeout, 30000)
 
 
 # 一段典型的 Gemini 会话：含用户图片、代码块、行内/块级公式、反馈按钮噪声，
@@ -256,6 +280,7 @@ class GeminiRealisticDomTests(unittest.TestCase):
         user = self.messages[0]["content"]
         self.assertIn("[上传文档]", user)
         self.assertIn("Lab 1.pdf", user)
+        self.assertIn("Gemini 分享页未提供下载", user)
         # 图片型附件（灯箱）保留为图片而非文档占位。
         self.assertIn("lh3.googleusercontent.com/gg/REALUSERIMG", user)
         self.assertNotIn("无法查看或下载", user)
@@ -265,6 +290,24 @@ class GeminiRealisticDomTests(unittest.TestCase):
             soup(REALISTIC_HTML), {"lab 1.pdf": "./attachments/Lab%201.pdf"}
         )
         self.assertIn("[Lab 1.pdf](./attachments/Lab%201.pdf)", messages[0]["content"])
+
+    def test_share_document_without_extension_uses_unique_local_stem(self):
+        html = """
+        <user-query>
+          <user-query-file-preview>
+            <button aria-label="无法查看或下载共享对话中的文件">
+              <div class="filename-label">工作交接极简版</div>
+            </button>
+          </user-query-file-preview>
+        </user-query>
+        """
+        messages = gemini.parse_messages(
+            soup(html), {"工作交接极简版.md": "./files/工作交接极简版.md"}
+        )
+        self.assertIn(
+            "[工作交接极简版.md](./files/工作交接极简版.md)",
+            messages[0]["content"],
+        )
 
     def test_private_document_uses_aria_extension_for_local_mapping(self):
         html = """

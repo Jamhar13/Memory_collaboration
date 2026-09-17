@@ -3,11 +3,21 @@
 新增平台时，在本目录创建模块并加入 PROVIDERS 即可。
 """
 
-from . import chatgpt, deepseek, doubao, gemini, kimi, qianwen, grok
+from urllib.parse import urlparse
+
+from . import chatgpt, codex, deepseek, doubao, gemini, kimi, qianwen, grok
 
 
-PROVIDERS = (chatgpt, deepseek, doubao, gemini, kimi, qianwen, grok)
+PROVIDERS = (chatgpt, deepseek, doubao, gemini, kimi, qianwen, grok, codex)
 WAIT_SELECTOR = ", ".join(provider.WAIT_SELECTOR for provider in PROVIDERS)
+
+
+def provider_for_url(url):
+    """按页面路径优先识别共用域名的平台，再回退到 host 路由。"""
+    parsed = urlparse(url or "")
+    if parsed.netloc.lower().split(":", 1)[0] in chatgpt.HOSTS and codex.is_codex_path(parsed.path):
+        return codex
+    return provider_for_host(parsed.netloc)
 
 
 def provider_for_host(host):
