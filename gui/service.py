@@ -3148,10 +3148,17 @@ async def _download_document_candidates(
                         page, candidate, 20000
                     )
                 elif is_gemini_card_candidate:
-                    body, headers = await _gemini_document_card_download(
-                        page, candidate, 60000
-                    )
-                    return candidate, body, headers, None
+                    for attempt in range(2):
+                        try:
+                            body, headers = await _gemini_document_card_download(
+                                page, candidate, 60000
+                            )
+                            return candidate, body, headers, None
+                        except Exception:
+                            if attempt:
+                                raise
+                            await page.keyboard.press("Escape")
+                            await page.wait_for_timeout(1000)
                 elif is_kimi_card_candidate:
                     body, headers = await _kimi_document_card_download(
                         page, candidate, 60000

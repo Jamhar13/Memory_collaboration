@@ -173,6 +173,31 @@ class GUIServiceTests(unittest.TestCase):
         self.assertIn("result.xlsx", headers["content-disposition"])
         page.keyboard.press.assert_awaited_once_with("Escape")
 
+    def test_gemini_document_download_retries_once(self):
+        page = SimpleNamespace(
+            keyboard=SimpleNamespace(press=AsyncMock()),
+            wait_for_timeout=AsyncMock(),
+        )
+        candidate = DocumentCandidate(
+            "gemini-card:data.csv",
+            "https://gemini.google.com/app/example",
+            "data.csv",
+        )
+        with tempfile.TemporaryDirectory() as temp_dir, patch(
+            "gui.service._gemini_document_card_download",
+            new=AsyncMock(side_effect=[TimeoutError, (b"a,b\n1,2\n", {})]),
+        ) as download:
+            mapping = asyncio.run(_download_document_candidates(
+                page,
+                [candidate],
+                Path(temp_dir),
+                "./result_files",
+            ))
+        self.assertEqual(download.await_count, 2)
+        page.keyboard.press.assert_awaited_once_with("Escape")
+        page.wait_for_timeout.assert_awaited_once_with(1000)
+        self.assertEqual(mapping[candidate.reference], "./result_files/data.csv")
+
     def test_gemini_share_metadata_and_document_cards(self):
         metadata = "[[\"r_file12345678\",\"c_058650b27dade1e6\"]]"
         import base64
