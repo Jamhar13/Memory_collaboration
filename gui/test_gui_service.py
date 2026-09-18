@@ -44,6 +44,7 @@ from gui.service import (
     DocumentCandidate,
     build_document_asset_directory,
     build_image_asset_directory,
+    build_image_asset_prefix,
     build_markdown_asset_prefix,
     build_output_paths,
     default_output_filename,
@@ -311,6 +312,107 @@ class GUIServiceTests(unittest.TestCase):
 
         self.assertEqual(page.fetches, [source])
 
+    def test_unloaded_gemini_image_still_uses_network_download(self):
+        source = "https://lh3.googleusercontent.com/gg/example"
+
+        class FakeResponse:
+            ok = True
+            headers = {"content-type": "image/png"}
+
+            async def body(self):
+                return b"\x89PNG\r\n\x1a\nreal"
+
+        class FakeImage:
+            async def get_attribute(self, name):
+                return source if name == "src" else None
+
+            async def scroll_into_view_if_needed(self, timeout):
+                return None
+
+            async def evaluate(self, script):
+                return False if "new Promise" in script else [0, 0]
+
+        class FakeImages:
+            async def count(self):
+                return 1
+
+            def nth(self, index):
+                return FakeImage()
+
+        class FakeRequest:
+            async def get(self, src, timeout):
+                return FakeResponse()
+
+        class FakePage:
+            request = FakeRequest()
+
+            def locator(self, selector):
+                return FakeImages()
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            image_map = asyncio.run(_download_image_candidates(
+                FakePage(), [source], Path(temp_dir), "./images",
+            ))
+            saved = Path(temp_dir) / Path(image_map[source]).name
+            self.assertEqual(saved.read_bytes(), b"\x89PNG\r\n\x1a\nreal")
+
+    def test_gemini_fallback_exports_full_decoded_image_without_lightbox(self):
+        source = "https://lh3.googleusercontent.com/gg/example"
+
+        class FakeResponse:
+            ok = False
+            status = 403
+            headers = {}
+
+        class FakeRequest:
+            async def get(self, src, timeout):
+                return FakeResponse()
+
+        class FakeImage:
+            async def get_attribute(self, name):
+                return source if name == "src" else None
+
+            async def is_visible(self):
+                return True
+
+            async def scroll_into_view_if_needed(self, timeout):
+                return None
+
+            async def evaluate(self, script):
+                if "trae-gemini-full-image" in script:
+                    return "full-image"
+                if "currentSrc" in script:
+                    return [None, source, None]
+                if "new Promise" in script:
+                    return True
+                return [640, 480]
+
+            async def screenshot(self, **kwargs):
+                return b"\x89PNG\r\n\x1a\nrendered"
+
+        class FakeImages:
+            async def count(self):
+                return 1
+
+            def nth(self, index):
+                return FakeImage()
+
+        class FakePage:
+            request = FakeRequest()
+
+            async def evaluate(self, script, src):
+                raise TimeoutError
+
+            def locator(self, selector):
+                return FakeImage() if selector.startswith("#") else FakeImages()
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            image_map = asyncio.run(_download_image_candidates(
+                FakePage(), [source], Path(temp_dir), "./images"
+            ))
+            saved = Path(temp_dir) / Path(image_map[source]).name
+            self.assertEqual(saved.read_bytes(), b"\x89PNG\r\n\x1a\nrendered")
+
     def test_existing_image_directory_stays_concurrent_and_deduplicated(self):
         class FakeResponse:
             def __init__(self, ok, payload):
@@ -571,6 +673,18 @@ class GUIServiceTests(unittest.TestCase):
             build_markdown_asset_prefix(asset_dir, base),
             "./课程 总结_images",
         )
+        absolute_base = Path.cwd() / "用户结果"
+        self.assertEqual(
+            build_markdown_asset_prefix(
+                absolute_base / "课程 总结_images",
+                absolute_base,
+            ),
+            "./课程 总结_images",
+        )
+        self.assertEqual(
+            build_image_asset_prefix(asset_dir),
+            asset_dir.resolve().as_uri(),
+        )
 
     def test_custom_runtime_directory_owns_summary_cache(self):
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -605,6 +719,7 @@ class GUIServiceTests(unittest.TestCase):
             {"normal": True},
             "课程总结.txt",
         )
+        self.assertEqual(single["asset_markdown"].name, "课程总结.md")
         self.assertEqual(single["normal_markdown"].name, "课程总结.md")
         self.assertEqual(single["normal_json"].name, "课程总结.json")
 
@@ -617,6 +732,16 @@ class GUIServiceTests(unittest.TestCase):
                 "detailed": True,
             },
             "课程总结.md",
+        )
+        self.assertEqual(
+            multiple["asset_markdown"].name,
+            "课程总结_export.md",
+        )
+        self.assertEqual(
+            build_image_asset_directory(
+                base, multiple["asset_markdown"].name
+            ),
+            base / "课程总结_export_images",
         )
         self.assertEqual(
             multiple["raw_markdown"].name,
@@ -690,8 +815,12 @@ class GUIServiceTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temp_dir:
             target = Path(temp_dir) / "output.md"
             messages = [
-                {"role": "User", "content": "你好"},
-                {"role": "AI", "content": "你好！有什么我可以帮你的？"}
+                {
+                    "role": "User",
+                    "content": "![截图](./output_images/截图.png)\n\n"
+                    "📎 [资料](./output_files/中文 资料.pdf)",
+                },
+                {"role": "AI", "content": "你好！有什么我可以帮你的？"},
             ]
             generate_raw_markdown(messages, target)
             self.assertTrue(target.is_file())
@@ -699,6 +828,8 @@ class GUIServiceTests(unittest.TestCase):
             self.assertIn("# AI 对话记忆导出", content)
             self.assertIn("用户提问", content)
             self.assertIn("AI 回答", content)
+            self.assertIn("![截图](./output_images/截图.png)", content)
+            self.assertIn("[资料](./output_files/中文 资料.pdf)", content)
 
     def test_normal_and_detailed_reuse_one_result_and_one_selection(self):
         messages = [

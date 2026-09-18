@@ -40,6 +40,7 @@ from gui.service import (
     MODE_FILENAME_SUFFIXES,
     build_document_asset_directory,
     build_image_asset_directory,
+    build_output_paths,
     default_output_filename,
     fetch_chat_pipeline,
     generate_output_bundle,
@@ -2706,13 +2707,17 @@ class AIMemoryGUI:
                 )
             else:
                 update_progress(0.15, "正在加载分享页并解析动态列表...")
+                output_paths = build_output_paths(
+                    save_dir, modes, output_filename
+                )
+                asset_owner = output_paths["asset_markdown"].name
                 image_output_dir = build_image_asset_directory(
                     save_dir,
-                    output_filename,
+                    asset_owner,
                 )
                 document_output_dir = build_document_asset_directory(
                     save_dir,
-                    output_filename,
+                    asset_owner,
                 )
                 fetch_res = loop.run_until_complete(
                     fetch_chat_pipeline(
@@ -2816,7 +2821,7 @@ class AIMemoryGUI:
             generation_seconds = (
                 time.perf_counter() - generation_started - selection_wait_seconds
             )
-            saved_files = [path.name for path in bundle.saved_files]
+            saved_files = [str(path.resolve()) for path in bundle.saved_files]
             processing = (
                 (bundle.summary_result or {}).get("processing", {})
                 if isinstance(bundle.summary_result, dict)

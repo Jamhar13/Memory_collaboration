@@ -824,6 +824,11 @@ def build_document_asset_directory(
 
 
 
+def build_image_asset_prefix(asset_dir: Path) -> str:
+    """构造不受编辑器工作目录影响的本地图片 URI。"""
+    return Path(asset_dir).resolve().as_uri()
+
+
 def build_markdown_asset_prefix(
     asset_dir: Path,
     markdown_dir: Path,
@@ -870,6 +875,7 @@ def build_output_paths(
         return f"{stem}{suffix}.json"
 
     return {
+        "asset_markdown": save_dir / markdown_names[enabled_modes[0]],
         "raw_markdown": save_dir / markdown_names["raw"],
         "normal_json": save_dir / json_name(
             "normal", "AI_memory_result.json"
@@ -1461,6 +1467,34 @@ async def _download_image_candidates(
             except (ValueError, TypeError):
                 return src, None, "invalid_data_url"
         failure_reason: Optional[str] = None
+        parsed_source = urlparse(src)
+        if (
+            parsed_source.netloc.lower() == "lh3.googleusercontent.com"
+            and parsed_source.path.startswith("/gg/")
+        ):
+            images = page.locator("img")
+            for index in range(await images.count()):
+                image = images.nth(index)
+                current = await image.get_attribute("src") or await image.get_attribute("data-src")
+                if current != src:
+                    continue
+                await image.scroll_into_view_if_needed(
+                    timeout=GUI_IMAGE_DOWNLOAD_TIMEOUT_MS
+                )
+                await image.evaluate(
+                    """img => img.complete && img.naturalWidth
+                        ? true
+                        : new Promise(resolve => {
+                            img.addEventListener('load', () => resolve(true), {once: true});
+                            img.addEventListener('error', () => resolve(false), {once: true});
+                            setTimeout(() => resolve(false), 10000);
+                        })"""
+                )
+                dimensions = await image.evaluate(
+                    "img => [img.naturalWidth, img.naturalHeight]"
+                )
+                if all(dimensions):
+                    break
         for _attempt in range(GUI_IMAGE_DOWNLOAD_ATTEMPTS):
             try:
                 async with semaphore:
@@ -1565,33 +1599,65 @@ async def _download_image_candidates(
                 failure_reason = type(fallback_error).__name__
             continue
         try:
+            is_gemini_upload = parsed_source.netloc.lower() == "lh3.googleusercontent.com"
             images = page.locator("img")
             for index in range(await images.count()):
                 image = images.nth(index)
-                current = await image.get_attribute("src") or await image.get_attribute("data-src")
-                if current == src and await image.is_visible():
-                    canvas_id = await image.evaluate(
-                        """img => {
-                            const canvas = document.createElement('canvas');
-                            canvas.id = `trae-image-${Date.now()}`;
-                            canvas.width = img.naturalWidth;
-                            canvas.height = img.naturalHeight;
-                            canvas.style.cssText = `position: fixed !important; left: 0 !important;
-                                top: 0 !important; z-index: 2147483647 !important;`;
-                            canvas.getContext('2d').drawImage(img, 0, 0);
-                            document.body.appendChild(canvas);
-                            return canvas.id;
-                        }"""
+                sources = await image.evaluate(
+                    "img => [img.src, img.currentSrc, img.getAttribute('data-src')]"
+                )
+                if src not in sources:
+                    continue
+                dimensions = await image.evaluate(
+                    "img => [img.naturalWidth, img.naturalHeight]"
+                )
+                if not all(dimensions):
+                    continue
+                if is_gemini_upload:
+                    wrapper_id = await image.evaluate(
+                        """img => new Promise(resolve => {
+                            const wrapper = document.createElement('div');
+                            wrapper.id = `trae-gemini-full-image-${Date.now()}`;
+                            wrapper.style.cssText = `
+                                position: fixed; left: 0; top: 0;
+                                z-index: 2147483647; display: block;
+                                width: ${img.naturalWidth}px;
+                                height: ${img.naturalHeight}px;
+                                background: #000;`;
+                            const clone = img.cloneNode(false);
+                            clone.removeAttribute('class');
+                            clone.removeAttribute('srcset');
+                            clone.removeAttribute('sizes');
+                            clone.style.cssText = `
+                                display: block; width: 100%; height: 100%;
+                                max-width: none; max-height: none;
+                                object-fit: fill; border-radius: 0;
+                                clip-path: none; transform: none;
+                                filter: none; opacity: 1;`;
+                            wrapper.appendChild(clone);
+                            document.body.appendChild(wrapper);
+                            if (clone.complete && clone.naturalWidth) {
+                                resolve(wrapper.id);
+                            } else {
+                                clone.onload = () => resolve(wrapper.id);
+                                clone.onerror = () => resolve(wrapper.id);
+                                setTimeout(() => resolve(wrapper.id), 5000);
+                            }
+                        })"""
                     )
-                    canvas = page.locator(f"#{canvas_id}")
+                    wrapper = page.locator(f"#{wrapper_id}")
                     try:
-                        body = await canvas.screenshot(
+                        body = await wrapper.screenshot(
                             type="png", timeout=GUI_IMAGE_DOWNLOAD_TIMEOUT_MS
                         )
                     finally:
-                        await canvas.evaluate("node => node.remove()")
-                    if _is_supported_image_body(body):
-                        return src, body, None
+                        await wrapper.evaluate("node => node.remove()")
+                else:
+                    body = await image.screenshot(
+                        type="png", timeout=GUI_IMAGE_DOWNLOAD_TIMEOUT_MS
+                    )
+                if _is_supported_image_body(body):
+                    return src, body, None
         except Exception as screenshot_error:
             failure_reason = type(screenshot_error).__name__
         return src, None, failure_reason or "unknown_error"
@@ -3334,12 +3400,12 @@ async def fetch_chat_pipeline(
         image_reference_prefix = "./images"
     else:
         resolved_images_dir = Path(image_output_dir).resolve()
-        reference_base = Path(
+        image_base = Path(
             image_reference_base or resolved_images_dir.parent
         ).resolve()
         image_reference_prefix = build_markdown_asset_prefix(
             resolved_images_dir,
-            reference_base,
+            image_base,
         )
     if document_output_dir is None:
         resolved_documents_dir = Path(PROJECT_ROOT, "attachments").resolve()
@@ -4237,17 +4303,18 @@ def generate_raw_markdown(messages: list[dict[str, str]], target_path: Path) -> 
     with open(target_path, "w", encoding="utf-8") as file:
         file.write("# AI 对话记忆导出\n\n")
         for item in messages:
+            content = item["content"]
             if item["role"] == "User":
                 file.write(
                     '\n<hr style="border: 0; border-top: 5px solid #2563EB; '
                     'margin: 48px 0 24px 0;">\n\n'
-                    f"## 🔵 👤 用户提问\n\n{item['content']}\n\n"
+                    f"## 🔵 👤 用户提问\n\n{content}\n\n"
                 )
             else:
                 file.write(
                     '\n<hr style="border: 0; border-top: 5px solid #9333EA; '
                     'margin: 48px 0 24px 0;">\n\n'
-                    f"## 🟣 🤖 AI 回答\n\n{item['content']}\n\n"
+                    f"## 🟣 🤖 AI 回答\n\n{content}\n\n"
                 )
     return target_path
 
