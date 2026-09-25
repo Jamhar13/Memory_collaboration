@@ -195,11 +195,35 @@ async def collect_html(page):
                 and resp_msg.get("status") == "complete"
             ):
                 content = (resp_msg.get("content") or "").strip()
+                images = []
+                for card in resp_msg.get("meta_data", {}).get("multi_load", []):
+                    card_content = card.get("content") or {}
+                    if card.get("type") != "ai_generate_image_list":
+                        continue
+                    urls = [
+                        image.get("url")
+                        for item in card_content.get("display_list", [])
+                        for image in item.get("image", [])
+                        if image.get("url")
+                    ]
+                    images.extend(url for url in urls if url not in images)
+                    source_seq = card.get("source_seq")
+                    if source_seq and urls:
+                        content = content.replace(
+                            f"[({source_seq})]",
+                            "\n\n".join(
+                                f"![千问生成的图片]({url})" for url in urls
+                            ),
+                        )
                 if content:
+                    image_nodes = "".join(
+                        f'<img src="{_html.escape(url, quote=True)}">'
+                        for url in images
+                    )
                     fragments.append(
                         f'<div class="qk-ai" data-content="'
                         f"{_html.escape(content, quote=True)}"
-                        f'"></div>'
+                        f'">{image_nodes}</div>'
                     )
 
     if not fragments:

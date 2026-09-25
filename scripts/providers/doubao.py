@@ -15,6 +15,20 @@ DIRECT_LIST_SELECTOR = "div[class*='message-list-']"
 DIRECT_MESSAGE_SELECTOR = "div.my-0.w-full.mx-auto"
 WAIT_SELECTOR = f"{SHARE_MESSAGE_SELECTOR}, {DIRECT_LIST_SELECTOR}"
 HOSTS = ("doubao.com", "www.doubao.com")
+_GENERATED_IMAGE_RE = re.compile(r"(/rc_gen_image/[^?]+?)~tplv-[^?]+-(cthumb|cgen)_")
+
+
+def prefer_original_generated_images(sources):
+    """同一豆包生成图同时出现缩略图和原图时只保留原图。"""
+    matches = [(src, _GENERATED_IMAGE_RE.search(str(src))) for src in sources]
+    original_keys = {
+        match.group(1) for _, match in matches
+        if match and match.group(2) == "cgen"
+    }
+    return [
+        src for src, match in matches
+        if not (match and match.group(2) == "cthumb" and match.group(1) in original_keys)
+    ]
 
 
 async def _scroll_messages(page, messages, message_count):
@@ -175,8 +189,16 @@ def _is_empty_svg_placeholder(img) -> bool:
 
 
 def _remove_assistant_image_artifacts(msg) -> None:
-    """移除豆包 AI 消息中的空占位图和重复界面图标。"""
-    for img in list(msg.find_all("img")):
+    """移除豆包 AI 消息中的空占位图、生成图缩略图和重复界面图标。"""
+    images = list(msg.find_all("img"))
+    kept_sources = set(prefer_original_generated_images([
+        img.get("src") or img.get("data-src") for img in images
+    ]))
+    for img in images:
+        src = str(img.get("src") or img.get("data-src") or "")
+        if src not in kept_sources:
+            img.decompose()
+            continue
         src = str(img.get("src") or img.get("data-src") or "")
         alt = str(img.get("alt") or "").strip().lower()
         if (
@@ -218,6 +240,9 @@ def parse_messages(soup, image_map=None):
         is_user = declared_role == 'user' or (
             not declared_role and 'justify-end' in classes
         )
+
+        if not is_user:
+            _remove_assistant_image_artifacts(msg)
 
         # 只把成功下载的真实图片替换为本地路径。豆包文档卡片还会
         # 内嵌 Asset cover/base64/fallback 装饰图，不能当成用户上传图片。
@@ -318,7 +343,6 @@ def parse_messages(soup, image_map=None):
                     'content': final_text
                 })
         else:
-            _remove_assistant_image_artifacts(msg)
             ai_document_links = []
             for card in msg.find_all(
                 "div", class_=re.compile(r"^product-card-")

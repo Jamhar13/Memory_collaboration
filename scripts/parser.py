@@ -219,7 +219,7 @@ async def fetch_chat_content(url, need_login=False):
                 for src in src_candidates:
                     if not (
                         src
-                        and src.startswith("http")
+                        and src.startswith(("http", "blob:"))
                         and not src.startswith("data:image/svg")
                         and src not in image_map
                     ):

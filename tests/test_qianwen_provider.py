@@ -166,6 +166,37 @@ class QianwenParseMessagesTests(unittest.TestCase):
 
 
 class QianwenPrivateCollectionTests(unittest.IsolatedAsyncioTestCase):
+    async def test_generated_image_card_replaces_placeholder_with_original(self):
+        original = "https://example.com/original.png"
+        records = [{
+            "request_messages": [{"mime_type": "text/plain", "content": "生成图片"}],
+            "response_messages": [{
+                "mime_type": "multi_load/iframe",
+                "status": "complete",
+                "content": "已生成\n\n[(ai_generate_image_list_1)]",
+                "meta_data": {"multi_load": [{
+                    "type": "ai_generate_image_list",
+                    "source_seq": "ai_generate_image_list_1",
+                    "content": {
+                        "display_list": [{
+                            "image": [{"url": original}],
+                            "thumbnail": [{"url": "https://example.com/thumb.png"}],
+                            "watermark_image": [{"url": "https://example.com/watermark.png"}],
+                        }],
+                    },
+                }]},
+            }],
+        }]
+        page = AsyncMock()
+        with patch.object(qianwen, "_collect_from_share", return_value=records):
+            html = await qianwen.collect_html(page)
+
+        self.assertIn(f"![千问生成的图片]({original})", html)
+        self.assertIn(f'src="{original}"', html)
+        self.assertNotIn("ai_generate_image_list_1", html)
+        self.assertNotIn("thumb.png", html)
+        self.assertNotIn("watermark.png", html)
+
     async def test_private_records_are_reversed_to_chronological_order(self):
         response = AsyncMock()
         response.text.return_value = '{"code":0,"data":{"list":[{"create_time":"2"},{"create_time":"1"}]}}'

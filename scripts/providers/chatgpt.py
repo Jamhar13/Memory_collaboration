@@ -128,7 +128,11 @@ def _restore_math_placeholders(text, replacements):
 
 async def collect_html(page):
     """逐屏收集 ChatGPT 虚拟列表中的消息，避免长对话首尾丢失。"""
-    role_selector = WAIT_SELECTOR
+    role_selector = (
+        f'{WAIT_SELECTOR}, '
+        '[data-testid^="conversation-turn-"][data-turn="assistant"]'
+        ':not(:has([data-message-author-role]))'
+    )
     if await page.locator(role_selector).count() == 0:
         return None
 
@@ -150,8 +154,8 @@ async def collect_html(page):
                 const turnMatch = testId.match(/(\d+)$/);
                 const messageId =
                     element.getAttribute('data-message-id') || '';
-                const role =
-                    element.getAttribute('data-message-author-role') || '';
+                const role = element.getAttribute('data-message-author-role')
+                    || (turn ? turn.getAttribute('data-turn') : '') || '';
                 const text =
                     element.innerText || element.textContent || '';
                 const imageScore = Array.from(
@@ -166,7 +170,13 @@ async def collect_html(page):
                     order: turnMatch ? Number(turnMatch[1]) : null,
                     text_length: text.length,
                     image_score: imageScore,
-                    html: (turn || element).outerHTML
+                    html: (() => {
+                        const snapshot = (turn || element).cloneNode(true);
+                        if (!snapshot.hasAttribute('data-message-author-role')) {
+                            snapshot.setAttribute('data-message-author-role', role);
+                        }
+                        return snapshot.outerHTML;
+                    })()
                 };
             })"""
         )
@@ -321,9 +331,12 @@ def parse_messages(soup, image_map=None):
     if image_map is None:
         image_map = {}
 
-    chatgpt_messages = soup.find_all(
-        attrs={"data-message-author-role": True}
-    )
+    chatgpt_messages = [
+        message for message in soup.find_all(
+            attrs={"data-message-author-role": True}
+        )
+        if message.find_parent(attrs={"data-message-author-role": True}) is None
+    ]
     if not chatgpt_messages:
         return None
 
@@ -439,9 +452,14 @@ def parse_messages(soup, image_map=None):
             })
 
         elif role == "assistant":
-            # 替换本地图片路径
-            for img in msg.find_all("img"):
+            # 替换本地图片路径，并移除生成图的重复展示节点。
+            seen_image_sources = set()
+            for img in list(msg.find_all("img")):
                 src = img.get("src") or img.get("data-src")
+                if src in seen_image_sources:
+                    img.decompose()
+                    continue
+                seen_image_sources.add(src)
                 if src in image_map:
                     img["src"] = image_map[src]
 

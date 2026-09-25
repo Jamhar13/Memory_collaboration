@@ -61,6 +61,26 @@ from scripts.gemini_summarizer import GeminiSummaryError, SummaryConfig
 
 
 class GUIServiceTests(unittest.TestCase):
+    def test_gemini_blob_image_is_downloaded(self):
+        body = b"\x89PNG\r\n\x1a\ncontent"
+        page = SimpleNamespace(
+            evaluate=AsyncMock(return_value=(
+                "data:;base64,iVBORw0KGgpjb250ZW50"
+            )),
+            locator=MagicMock(),
+        )
+        page.request = SimpleNamespace(get=AsyncMock(side_effect=ValueError))
+        with tempfile.TemporaryDirectory() as temp_dir:
+            mapping = asyncio.run(_download_image_candidates(
+                page,
+                ["blob:https://gemini.google.com/generated"],
+                Path(temp_dir),
+                "./images",
+            ))
+            self.assertEqual(len(mapping), 1)
+            saved = Path(temp_dir) / Path(next(iter(mapping.values()))).name
+            self.assertEqual(saved.read_bytes(), body)
+
     def test_background_browser_starts_offscreen(self):
         launcher = AsyncMock(return_value=(object(), "chromium"))
         playwright = SimpleNamespace(

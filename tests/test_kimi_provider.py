@@ -24,6 +24,7 @@ from gui.service import (
     _collect_response_assets,
     _download_image_candidates,
     _extract_kimi_document_card_candidates,
+    _is_asset_metadata_response,
     _kimi_private_conversation_url,
     requires_authenticated_browser,
 )
@@ -338,6 +339,33 @@ class KimiRegistryTests(unittest.TestCase):
         )
         self.assertEqual([item.filename for item in documents], ["result.xlsx"])
         self.assertEqual(images, {"https://www.kimi.com/chart.png"})
+
+    def test_private_message_generated_image_is_collected(self):
+        source = (
+            "https://www.kimi.com/apiv2-files/sign-obj/example"
+            "?filename=starry_night_mountains.png&sig=example"
+        )
+        payload = {"messages": [{"references": [{"items": [{"file": {
+            "file": {
+                "meta": {"name": "starry_night_mountains.png"},
+                "blob": {"signUrl": source},
+            },
+            "fileName": "starry_night_mountains.png",
+        }}]}]}]}
+        documents, images = [], set()
+
+        self.assertTrue(_is_asset_metadata_response(
+            "https://www.kimi.com/apiv2/"
+            "kimi.gateway.chat.v1.ChatService/ListMessages"
+        ))
+        _collect_response_assets(
+            payload,
+            "https://www.kimi.com/chat/private-id-12345678",
+            documents,
+            images,
+        )
+
+        self.assertEqual(images, {source})
 
     def test_signed_image_filename_maps_to_local_asset(self):
         source = (

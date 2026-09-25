@@ -17,6 +17,7 @@ Grok 是 xAI 的对话产品，基于 Next.js SSR（React Server Components）
 """
 
 import re
+from collections.abc import Mapping
 
 import markdownify
 from bs4 import NavigableString, Tag
@@ -37,12 +38,54 @@ _THINK_TIME_RE = re.compile(r"^工作了\s*\d+\s*s\s*", re.IGNORECASE)
 _USER_CLASS_RE = re.compile(r"bg-surface|border-border")
 
 
-async def collect_html(page):
-    """采集 Grok 会话片段；页面不属于 Grok 时返回 None。
+def parse_api_messages(payload, image_map=None):
+    """解析 Grok 接口返回的完整消息链。"""
+    records = payload.get("responses", []) if isinstance(payload, Mapping) else []
+    image_map = image_map or {}
+    messages = []
+    for record in records:
+        if not isinstance(record, Mapping):
+            continue
+        role = "User" if record.get("sender") == "human" else "AI"
+        chunks = record.get("inputChunks" if role == "User" else "outputChunks", [])
+        texts = []
+        for chunk in chunks or []:
+            text = chunk.get("text") if isinstance(chunk, Mapping) else None
+            if not isinstance(text, Mapping):
+                continue
+            if role == "AI" and text.get("channel") != "CHANNEL_ASSISTANT_RESPONSE":
+                continue
+            value = str(text.get("text") or "").strip()
+            if value:
+                texts.append(value)
+        parts = []
+        for item in record.get("fileAttachmentsMetadata", []) or []:
+            if not isinstance(item, Mapping):
+                continue
+            name = str(item.get("fileName") or "").strip()
+            uri = str(item.get("fileUri") or "").strip()
+            remote = f"https://assets.grok.com/{uri}" if uri.startswith("users/") else ""
+            local = (
+                image_map.get(remote) or image_map.get(name.lower())
+                or image_map.get(name, "")
+            )
+            mime_type = str(item.get("fileMimeType") or "").lower()
+            if name and mime_type.startswith("image/"):
+                parts.append(f"![{name}]({local or remote})" if local or remote else name)
+            elif name:
+                parts.append(f"📎 [{name}]({local})" if local else f"📎 **[上传文件]** `{name}`")
+        parts.extend(texts)
+        if not texts:
+            message = str(record.get("message") or "").strip()
+            if message and (role == "AI" or not parts):
+                parts.append(message)
+        if parts:
+            messages.append({"role": role, "content": "\n\n".join(parts)})
+    return messages or None
 
-    Grok 没有虚拟列表，消息初始即挂载；滚动仅为触发 lazy 图片。
-    按文档顺序收集 ``.message-bubble[role="article"]`` 的 outerHTML。
-    """
+
+async def collect_html(page):
+    """采集 Grok 会话 DOM，并补齐没有文字气泡的纯附件消息。"""
     turns = page.locator(WAIT_SELECTOR)
     try:
         count = await turns.count()
@@ -66,14 +109,43 @@ async def collect_html(page):
 
     try:
         fragments = await page.evaluate(
-            """() => Array.from(
-                document.querySelectorAll('.message-bubble[role="article"]')
-            ).map(el => {
-                const attachments = el.previousElementSibling;
-                return attachments?.querySelector('button[aria-label="打开附件"]')
-                    ? attachments.outerHTML + el.outerHTML
-                    : el.outerHTML;
-            })"""
+            """() => {
+                const bubbles = Array.from(document.querySelectorAll(
+                    '.message-bubble[role="article"]'
+                ));
+                const items = [];
+                const seen = new Set();
+                for (const bubble of bubbles) {
+                    const container = bubble.closest('[id^="response-"]')
+                        || bubble.parentElement;
+                    seen.add(container);
+                    items.push({
+                        node: container,
+                        html: container?.querySelector(
+                            'button[aria-label="打开附件"]'
+                        ) ? container.outerHTML : bubble.outerHTML,
+                    });
+                }
+                for (const button of document.querySelectorAll(
+                    'button[aria-label="打开附件"]'
+                )) {
+                    const container = button.closest('[id^="response-"]')
+                        || button.parentElement;
+                    if (seen.has(container)) continue;
+                    seen.add(container);
+                    const buttons = Array.from(container.querySelectorAll(
+                        'button[aria-label="打开附件"]'
+                    )).map(item => item.outerHTML).join('');
+                    items.push({
+                        node: container,
+                        html: '<div class="message-bubble" role="article" '
+                            + 'data-testid="user-message">'
+                            + buttons + '</div>',
+                    });
+                }
+                items.sort((a, b) => a.node.compareDocumentPosition(b.node) & 4 ? -1 : 1);
+                return items.map(item => item.html);
+            }"""
         )
     except Exception:
         return None
@@ -93,6 +165,9 @@ async def collect_html(page):
 
 def _is_user_bubble(bubble):
     """判断 .message-bubble 是用户还是 AI。"""
+    test_id = bubble.get("data-testid")
+    if test_id:
+        return test_id == "user-message"
     classes = bubble.get("class") or []
     class_text = " ".join(classes) if isinstance(classes, list) else str(classes)
     return bool(_USER_CLASS_RE.search(class_text))
@@ -126,10 +201,12 @@ def _render_user(bubble, image_map):
     """提取用户消息正文，并保留图片和文件附件文本。"""
     parts = []
     attachments = bubble.find_previous_sibling()
+    if not attachments or not attachments.select_one('button[aria-label="打开附件"]'):
+        attachments = bubble.parent
     if attachments:
         for button in attachments.select('button[aria-label="打开附件"]'):
             name = button.get_text(" ", strip=True)
-            local = image_map.get(name.lower(), "")
+            local = image_map.get(name.lower()) or image_map.get(name, "")
             img = button.find("img")
             if img:
                 src = img.get("src") or ""
@@ -180,11 +257,13 @@ def parse_messages(soup, image_map=None):
 
     image_map = image_map or {}
     messages = []
-    for bubble in bubbles:
+    has_user_classes = any(_is_user_bubble(bubble) for bubble in bubbles)
+    alternate_roles = not has_user_classes and len(bubbles) > 1
+    for index, bubble in enumerate(bubbles):
         if not isinstance(bubble, Tag):
             continue
         try:
-            if _is_user_bubble(bubble):
+            if _is_user_bubble(bubble) or (alternate_roles and index % 2 == 0):
                 content = _render_user(bubble, image_map)
                 if content:
                     messages.append({"role": "User", "content": content})
@@ -195,4 +274,10 @@ def parse_messages(soup, image_map=None):
         except Exception:
             continue
 
-    return messages or None
+    paired = []
+    for message in messages:
+        if paired and message["role"] == paired[-1]["role"]:
+            paired[-1]["content"] += "\n\n" + message["content"]
+        else:
+            paired.append(message)
+    return paired or None

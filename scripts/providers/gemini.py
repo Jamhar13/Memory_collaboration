@@ -372,6 +372,11 @@ def _render_user(node, image_map) -> str:
 
 def _render_assistant(node, image_map) -> str:
     _normalize_code_blocks(node)
+    # Gemini 生成图位于操作 button 内；清理按钮前先把图片提升出来。
+    for img in list(node.select("button img")):
+        if str(img.get("src") or "").startswith("blob:"):
+            img["alt"] = "Gemini 生成的图片"
+        img.parent.insert_before(img.extract())
     _strip_noise(node)
     math_replacements = _extract_math(node)
     _strip_decorative_images(node)

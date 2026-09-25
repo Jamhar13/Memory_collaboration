@@ -66,6 +66,36 @@ class GrokParseMessagesTests(unittest.TestCase):
         self.assertEqual(messages[1]["role"], "AI")
         self.assertIn("插值", messages[1]["content"])
 
+    def test_new_dom_uses_data_testid_roles(self):
+        html = (
+            '<div class="message-bubble" role="article" '
+            'data-testid="assistant-message"><div class="markdown">AI</div></div>'
+            '<div class="message-bubble" role="article" '
+            'data-testid="user-message"><div class="markdown">用户</div></div>'
+        )
+        messages = grok.parse_messages(BeautifulSoup(html, "html.parser"), {})
+        self.assertEqual(
+            [message["role"] for message in messages],
+            ["AI", "User"],
+        )
+
+    def test_new_dom_without_user_classes_falls_back_to_turn_order(self):
+        html = (
+            '<div class="message-bubble relative" role="article">'
+            '<div class="markdown">生成一张图片给我</div></div>'
+            '<div class="message-bubble relative" role="article">'
+            '<div class="markdown">请描述图片</div></div>'
+            '<div class="message-bubble relative" role="article">'
+            '<div class="markdown">风景</div></div>'
+            '<div class="message-bubble relative" role="article">'
+            '<div class="markdown">已生成</div></div>'
+        )
+        messages = grok.parse_messages(BeautifulSoup(html, "html.parser"), {})
+        self.assertEqual(
+            [message["role"] for message in messages],
+            ["User", "AI", "User", "AI"],
+        )
+
     def test_multiple_rounds(self):
         html = _build_html([
             ("User", "<p>插值是什么</p>"),
@@ -437,15 +467,20 @@ class GrokRenderUserTests(unittest.TestCase):
         self.assertIn("[result.xlsx](./files/result.xlsx)", result)
         self.assertIn("请分析", result)
 
-    def test_file_attachment_without_mapping_keeps_placeholder(self):
+    def test_file_attachment_keeps_user_prompt(self):
         html = (
             '<div><button aria-label="打开附件"><span>result.xlsx</span></button></div>'
-            + _build_html([("User", "<p>请分析</p>")]).split("<body>", 1)[1]
+            + _build_html([("User", "<p>请分析这个文件</p>")]).split("<body>", 1)[1]
         )
         soup = BeautifulSoup(html, "html.parser")
-        result = grok._render_user(soup.select_one(".message-bubble"), {})
-        self.assertIn("[上传文件]", result)
-        self.assertIn("result.xlsx", result)
+        result = grok._render_user(
+            soup.select_one(".message-bubble"),
+            {"result.xlsx": "./AI_memory_export_files/result.xlsx"},
+        )
+        self.assertIn(
+            "📎 [result.xlsx](./AI_memory_export_files/result.xlsx)", result,
+        )
+        self.assertIn("请分析这个文件", result)
 
     def test_image_attachment_prefers_original_content(self):
         preview = "https://assets.grok.com/users/u/a/preview-image"
@@ -534,6 +569,93 @@ class GrokRenderAiTests(unittest.TestCase):
         result = grok._render_ai(bubble, {"https://cdn.grok.com/i.png": "./images/i.png"})
         # img is stripped by markdownify, but verify no crash
         self.assertIsNotNone(result)
+
+
+class GrokApiMessagesTests(unittest.TestCase):
+    def test_complete_api_chain_preserves_turn_order(self):
+        payload = {"responses": [
+            {"sender": "human", "inputChunks": [{"text": {"text": "问题一"}}]},
+            {"sender": "assistant", "outputChunks": [{"text": {
+                "text": "回答一", "channel": "CHANNEL_ASSISTANT_RESPONSE",
+            }}]},
+            {"sender": "human", "inputChunks": [{"text": {"text": "问题二"}}]},
+            {"sender": "assistant", "outputChunks": [{"text": {
+                "text": "回答二", "channel": "CHANNEL_ASSISTANT_RESPONSE",
+            }}]},
+        ]}
+        messages = grok.parse_api_messages(payload)
+        self.assertIsNotNone(messages)
+        self.assertEqual(
+            [(item["role"], item["content"]) for item in messages],
+            [("User", "问题一"), ("AI", "回答一"),
+             ("User", "问题二"), ("AI", "回答二")],
+        )
+
+
+    def test_private_attachment_only_turns_are_not_dropped(self):
+        payload = {"responses": [
+            {"sender": "human", "inputChunks": [],
+             "fileAttachmentsMetadata": [{"fileName": "规则.pdf"}]},
+            {"sender": "assistant", "message": "已读取规则",
+             "outputChunks": []},
+            {"sender": "human", "inputChunks": [],
+             "fileAttachmentsMetadata": [{"fileName": "申请表.doc"}]},
+            {"sender": "assistant", "message": "已读取申请表",
+             "outputChunks": []},
+        ]}
+        messages = grok.parse_api_messages(payload)
+        self.assertEqual([item["role"] for item in messages],
+                         ["User", "AI", "User", "AI"])
+        self.assertIn("规则.pdf", messages[0]["content"])
+        self.assertEqual(messages[1]["content"], "已读取规则")
+        self.assertIn("申请表.doc", messages[2]["content"])
+        self.assertEqual(messages[3]["content"], "已读取申请表")
+
+    def test_generated_image_uses_downloaded_local_path(self):
+        remote = "https://assets.grok.com/users/u/generated/id/image.jpg"
+        payload = {"responses": [{
+            "sender": "assistant",
+            "outputChunks": [{"text": {
+                "text": "风景图", "channel": "CHANNEL_ASSISTANT_RESPONSE",
+            }}],
+            "fileAttachmentsMetadata": [{
+                "fileName": "image.jpg",
+                "fileMimeType": "image/jpeg",
+                "fileUri": "users/u/generated/id/image.jpg",
+            }],
+        }]}
+        messages = grok.parse_api_messages(payload, {remote: "./images/image.jpg"})
+        self.assertIn("![image.jpg](./images/image.jpg)", messages[0]["content"])
+
+
+class GrokStandaloneAttachmentTests(unittest.TestCase):
+    def test_consecutive_attachment_fragments_merge_into_one_user_turn(self):
+        html = (
+            '<div class="message-bubble" role="article" '
+            'data-testid="user-message"><button aria-label="打开附件">a.md</button></div>'
+            '<div class="message-bubble" role="article" '
+            'data-testid="user-message"><button aria-label="打开附件">b.md</button></div>'
+            '<div class="message-bubble" role="article" '
+            'data-testid="assistant-message"><div class="markdown">摘要</div></div>'
+        )
+        messages = grok.parse_messages(BeautifulSoup(html, "html.parser"), {})
+        self.assertEqual([item["role"] for item in messages], ["User", "AI"])
+        self.assertIn("a.md", messages[0]["content"])
+        self.assertIn("b.md", messages[0]["content"])
+
+    def test_attachment_only_user_turn_is_preserved(self):
+        html = (
+            '<div class="message-bubble" role="article" '
+            'data-testid="user-message">'
+            '<button aria-label="打开附件">first.md</button></div>'
+            '<div class="message-bubble" role="article" '
+            'data-testid="assistant-message"><div class="markdown">摘要</div></div>'
+        )
+        messages = grok.parse_messages(BeautifulSoup(html, "html.parser"), {
+            "first.md": "./files/first.md",
+        })
+        self.assertEqual([item["role"] for item in messages], ["User", "AI"])
+        self.assertIn("./files/first.md", messages[0]["content"])
 
 
 class GrokParseEdgeCaseTests(unittest.TestCase):

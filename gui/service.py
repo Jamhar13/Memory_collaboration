@@ -43,6 +43,8 @@ from scripts.providers import (
     WAIT_SELECTOR,
     codex,
     collect_virtualized_html,
+    doubao,
+    grok,
     parse_messages,
     provider_for_url,
 )
@@ -236,9 +238,18 @@ def _collect_response_assets(
                     image_references.add(asset_url)
 
         if host in KIMI_HOSTS and filename:
+            nested_file = item.get("file")
+            nested_blob = (
+                nested_file.get("blob")
+                if isinstance(nested_file, Mapping) else None
+            )
             asset_url = str(
                 item.get("url") or item.get("signUrl")
-                or item.get("thumbnailUrl") or ""
+                or item.get("thumbnailUrl")
+                or (
+                    nested_blob.get("signUrl")
+                    if isinstance(nested_blob, Mapping) else ""
+                )
             ).strip()
             if asset_url.startswith(("http://", "https://")):
                 if suffix in DOCUMENT_EXTENSIONS:
@@ -489,9 +500,15 @@ def _is_asset_metadata_response(response_url: str) -> bool:
             for token in ("/im/chain/single", "/im/chain/batch_single")
         )
     if host in GROK_HOSTS:
-        return path.endswith("/load-responses")
+        return path.endswith("/load-responses") or bool(
+            re.fullmatch(r"/rest/app-chat/share_links/[^/]+/?", path)
+        )
     if host in KIMI_HOSTS:
-        return path.endswith(("/getchatshare", "/getoutputfiletreebyshare"))
+        return path.endswith((
+            "/getchatshare",
+            "/getoutputfiletreebyshare",
+            "/listmessages",
+        ))
     return False
 
 
@@ -3428,11 +3445,13 @@ async def fetch_chat_pipeline(
         )
     requires_login_probe = requires_authenticated_browser(url)
     requested_path = urlparse(url).path
-    codex_request = codex.is_codex_path(requested_path)
-    # Codex 公有页在无头 Chromium 中可能落入 Cloudflare 验证页，也要先探测
-    # 真实消息节点，失败后复用现有的有头浏览器回退链。
-    requires_content_probe = requires_login_probe or codex_request
     requested_host = urlparse(url).netloc.lower().split(":", 1)[0]
+    codex_request = codex.is_codex_path(requested_path)
+    # Codex/Grok 公有页在无头 Chromium 中可能落入 Cloudflare 验证页，也要先探测
+    # 真实消息节点，失败后复用现有的有头浏览器回退链。
+    requires_content_probe = (
+        requires_login_probe or codex_request or requested_host in GROK_HOSTS
+    )
     doubao_public_thread = (
         requested_host in DOUBAO_HOSTS and requested_path.startswith("/thread/")
     )
@@ -3492,6 +3511,7 @@ async def fetch_chat_pipeline(
             authorized_content_responses: set[str] = set()
             codex_file_changes: list[Mapping[str, str]] = []
             codex_payload_messages: list[dict[str, str]] = []
+            grok_payload: dict[str, Any] = {}
             chatgpt_assets_rehydrated = False
             pre_rehydrate_chat_html: Optional[str] = None
 
@@ -3505,6 +3525,19 @@ async def fetch_chat_pipeline(
                         body,
                         "https://www.doubao.com",
                     )
+                )
+
+            async def capture_grok_payload(response: Any) -> None:
+                try:
+                    payload = await response.json()
+                except Exception:
+                    return
+                if isinstance(payload, Mapping) and payload.get("responses"):
+                    grok_payload.clear()
+                    grok_payload.update(payload)
+                _collect_response_assets(
+                    payload, url, response_document_candidates,
+                    response_image_references,
                 )
 
             def capture_response_assets(response: Any) -> None:
@@ -3533,12 +3566,24 @@ async def fetch_chat_pipeline(
                 elif _is_asset_metadata_response(response.url):
                     if response.status == 200:
                         authorized_content_responses.add(response.url)
-                    task = asyncio.create_task(_capture_response_assets(
-                        response,
-                        url,
-                        response_document_candidates,
-                        response_image_references,
-                    ))
+                    if (
+                        requested_host in GROK_HOSTS
+                        and (
+                            response_url.path.lower().endswith("/load-responses")
+                            or re.fullmatch(
+                                r"/rest/app-chat/share_links/[^/]+/?",
+                                response_url.path,
+                            )
+                        )
+                    ):
+                        task = asyncio.create_task(capture_grok_payload(response))
+                    else:
+                        task = asyncio.create_task(_capture_response_assets(
+                            response,
+                            url,
+                            response_document_candidates,
+                            response_image_references,
+                        ))
                 elif _is_document_content_response(response.url):
                     task = asyncio.create_task(
                         _capture_document_content_response(
@@ -3900,7 +3945,7 @@ async def fetch_chat_pipeline(
                         if not (
                             src
                             and (
-                                src.startswith("http")
+                                src.startswith(("http", "blob:"))
                                 or src.startswith("data:image/png;base64,")
                             )
                         ):
@@ -3917,6 +3962,11 @@ async def fetch_chat_pipeline(
                         ):
                             continue
                         image_candidates.append(src)
+
+                if current_host in DOUBAO_HOSTS:
+                    image_candidates = doubao.prefer_original_generated_images(
+                        image_candidates
+                    )
 
                 download_started = time.perf_counter()
                 image_warnings: list[str] = []
@@ -4213,6 +4263,11 @@ async def fetch_chat_pipeline(
                 if codex_request and codex_payload_messages:
                     parsed_messages = codex_payload_messages
                     provider = codex
+                elif grok_payload:
+                    parsed_messages = grok.parse_api_messages(
+                        grok_payload, parser_asset_map
+                    )
+                    provider = grok
                 if parsed_messages and codex_request:
                     for message in parsed_messages:
                         message["content"] = _rewrite_codex_local_links(

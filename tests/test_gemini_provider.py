@@ -271,6 +271,22 @@ class GeminiRealisticDomTests(unittest.TestCase):
         self.assertNotIn("gstatic.com", ai)
         self.assertIn("lh3.googleusercontent.com/gg/AIPIC", ai)
 
+    def test_generated_image_inside_button_is_kept_as_answer(self):
+        html = """
+        <message-content><div class="attachment-container generated-images">
+          <button class="image-button"><img class="image loaded"
+            src="blob:https://gemini.google.com/generated" alt="long prompt"></button>
+        </div></message-content>
+        """
+        messages = gemini.parse_messages(
+            soup(html),
+            {"blob:https://gemini.google.com/generated": "./images/generated.png"},
+        )
+        self.assertEqual(messages, [{
+            "role": "AI",
+            "content": "![Gemini 生成的图片](./images/generated.png)",
+        }])
+
     def test_empty_footnote_stripped(self):
         ai = self.messages[1]["content"]
         self.assertNotIn("<sup", ai)

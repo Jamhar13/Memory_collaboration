@@ -1143,6 +1143,34 @@ class GeminiSummarizerTests(unittest.TestCase):
             '1~10, 17, 18, 29~86, 89~186, 213~228, 231~236'
         )
 
+    def test_chatgpt_nested_role_nodes_are_not_duplicated(self):
+        html = """
+        <section data-message-author-role="user">
+          <div data-message-author-role="user">生成一张图片给我</div>
+        </section>
+        """
+        self.assertEqual(chatgpt.parse_messages(
+            BeautifulSoup(html, "html.parser"),
+        ), [{"role": "User", "content": "生成一张图片给我"}])
+
+    def test_chatgpt_generated_image_only_answer_is_preserved(self):
+        source = "https://chatgpt.com/backend-api/estuary/content?id=file_image"
+        html = f"""
+        <section data-message-author-role="assistant">
+          <img src="{source}" alt="已生成图片：学习桌">
+          <img src="{source}" alt="已生成图片：学习桌">
+          <img src="{source}" alt="已生成图片：学习桌">
+        </section>
+        """
+        messages = chatgpt.parse_messages(
+            BeautifulSoup(html, "html.parser"),
+            {source: "./images/generated.png"},
+        )
+        self.assertEqual(messages, [{
+            "role": "AI",
+            "content": "![已生成图片：学习桌](./images/generated.png)",
+        }])
+
     def test_chatgpt_math_nodes_restore_latex_before_markdown_conversion(self):
         html = r"""
         <div data-message-author-role="assistant">
@@ -1656,6 +1684,32 @@ output = "Harry Potter_translated.pdf"</pre>
         self.assertIn("AI 生成的在线报告", assets[0].description)
         self.assertNotIn("AI 生成的正文内容", assets[0].description)
         self.assertEqual(gateway.media_assets, [])
+
+    def test_doubao_generated_image_prefers_original_over_thumbnail(self):
+        thumbnail = (
+            "https://cdn.example/rc_gen_image/same.jpeg"
+            "~tplv-x-cthumb_lwm3.png?thumb"
+        )
+        original = (
+            "https://cdn.example/rc_gen_image/same.jpeg"
+            "~tplv-x-cgen_lwm3.png?original"
+        )
+        html = f"""
+        <div class="message-item">
+          <img alt="image" src="{thumbnail}" />
+          <img src="{original}" />
+        </div>
+        """
+        messages = doubao.parse_messages(
+            BeautifulSoup(html, "html.parser"),
+            {thumbnail: "./images/thumb.jpg", original: "./images/original.jpg"},
+        )
+        self.assertNotIn("thumb.jpg", messages[0]["content"])
+        self.assertIn("original.jpg", messages[0]["content"])
+        self.assertEqual(
+            doubao.prefer_original_generated_images([thumbnail, original]),
+            [original],
+        )
 
     def test_doubao_ai_images_drop_empty_placeholders_and_repeated_ui_icons(self):
         placeholder = (
